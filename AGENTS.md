@@ -1,5 +1,7 @@
 # STS2 MCP — AI Gameplay Guide
 
+**Upstream PR approval** — Before opening, reopening, or pushing any update to an upstream PR, clarify what the user means by requests such as “push to upstream,” explain the exact action, target repository and base branch, source branch, and full diff against that base, then get three separate explicit confirmations from the user for that exact scope. If the scope changes, repeat all three confirmations before proceeding.
+
 ## MCP Tool Calling Tips
 
 ### State Polling
