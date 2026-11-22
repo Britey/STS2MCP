@@ -1,10 +1,12 @@
 # Install and use Co-op Chat
 
+[简体中文](chat-install.zh-CN.md)
+
 Co-op Chat adds in-game messages, quick replies, and group ballots to Slay the Spire 2. This release was tested on Windows with game version **v0.113.1**.
 
 ## Install on each player's game
 
-1. Quit Slay the Spire 2. Download **STS2_Coordination-0.2.0.zip** from the **Co-op Chat** release. Everyone in the party should use the same chat mod version. [Britey's GitHub releases](https://github.com/Britey/STS2MCP/releases)
+1. Quit Slay the Spire 2. Download **STS2_Coordination-0.2.0.zip**. Everyone in the party should use the same chat mod version. [Co-op Chat 0.2.0](https://github.com/Britey/STS2MCP/releases/tag/chat-v0.2.0)
 2. In Steam, right-click **Slay the Spire 2**, then choose **Manage → Browse local files**. Open the `mods` folder there, or create it if needed. On macOS, open **Show Package Contents** on `SlayTheSpire2.app` and use `Contents/MacOS/mods`.
 3. Extract the ZIP and copy the whole `STS2_Coordination` folder into `mods`. Check that the folders and files look like this:
 

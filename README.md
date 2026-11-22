@@ -6,6 +6,8 @@
 
 STS2MCP lets an AI agent read and play Slay the Spire 2 in solo and co-op runs. Co-op Chat adds in-game messages, quick replies, and party polls for human and AI teammates.
 
+**简体中文** · [联机聊天安装指南](docs/chat-install.zh-CN.md) · [MCP 安装与智能体指南](mcp/README.zh-CN.md)
+
 ## Choose what to install
 
 | I want to… | Download | Start here |

@@ -1,10 +1,12 @@
 # MCP setup and agent guide
 
+[简体中文](README.zh-CN.md)
+
 The MCP release pairs an in-game bridge with a local stdio server. The bridge exposes game state and actions to the server, which presents them as MCP tools. The release was tested on Windows with Slay the Spire 2 **v0.113.1**.
 
 ## Install and connect
 
-1. Quit the game. Download **STS2_MCP-0.5.0.zip** and **STS2_MCP-client-0.5.0.zip** from the same **MCP** release. [Britey's GitHub releases](https://github.com/Britey/STS2MCP/releases)
+1. Quit the game. Download both **STS2_MCP-0.5.0.zip** and **STS2_MCP-client-0.5.0.zip**. [STS2 MCP 0.5.0](https://github.com/Britey/STS2MCP/releases/tag/mcp-v0.5.0)
 2. In Steam, right-click the game and select **Manage → Browse local files**. Extract `STS2_MCP-0.5.0.zip` and place its `STS2_MCP` folder inside the game's `mods` folder. Create `mods` if needed. Keep `STS2_MCP.dll` and `STS2_MCP.json` together as `mods/STS2_MCP/STS2_MCP.dll` and `mods/STS2_MCP/STS2_MCP.json`. On macOS, the mods directory is inside `SlayTheSpire2.app/Contents/MacOS/mods/`.
 3. Launch the game and accept the mod loading prompt if it appears. Check that **STS2 MCP** appears in the in-game Mods screen.
 4. Extract the client ZIP to a permanent folder such as `C:/Tools/STS2MCP`, with `mcp/server.py`, `mcp/pyproject.toml`, and `mcp/uv.lock` inside. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and use Python 3.11 or newer. This checks the launch command and installs the locked dependencies:
