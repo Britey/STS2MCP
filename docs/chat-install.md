@@ -6,7 +6,7 @@ Co-op Chat adds in-game messages, quick replies, and group ballots to Slay the S
 
 ## Install on each player's game
 
-1. Quit Slay the Spire 2. Download **STS2_Coordination-0.2.0.zip**. Everyone in the party should use the same chat mod version. [Co-op Chat 0.2.0](https://github.com/Britey/STS2MCP/releases/tag/chat-v0.2.0)
+1. Quit Slay the Spire 2. Download **STS2_Coordination-0.2.1.zip**. Everyone in the party should use the same chat mod version. [Co-op Chat 0.2.1](https://github.com/Britey/STS2MCP/releases/tag/chat-v0.2.1)
 2. In Steam, right-click **Slay the Spire 2**, then choose **Manage → Browse local files**. Open the `mods` folder there, or create it if needed. On macOS, open **Show Package Contents** on `SlayTheSpire2.app` and use `Contents/MacOS/mods`.
 3. Extract the ZIP and copy the whole `STS2_Coordination` folder into `mods`. Check that the folders and files look like this:
 
@@ -24,6 +24,7 @@ Human guests need only Co-op Chat. Each AI-controlled game also needs the MCP mo
 ## Chat, vote, or reply
 
 - Open **Chat** (**聊天**), choose a teammate, type a message, and press **Send** or **Enter**. Choose **Everyone** (**所有队友**) to message the party when you have multiple teammates.
+- Scroll up in **Chat** to read the last 40 messages sent or received in this co-op session. Sending a message keeps the panel open. The history stays available after the short on-screen preview fades.
 - When a teammate asks a question, click a reply button. If the prompt offers **Type a reply**, you can write your own answer. If you choose to go first, make your play and use **Go ahead** if the prompt is still waiting.
 - In a group poll, each recipient can vote once. Most-votes polls choose the option with the highest tally. If there's a tie, the host gets a second ballot with the tied choices. A poll asking whether *anyone* can do something settles on the first Yes. No requires everyone to vote No.
 

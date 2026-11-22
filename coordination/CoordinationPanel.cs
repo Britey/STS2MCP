@@ -9,6 +9,7 @@ internal partial class CoordinationPanel : CanvasLayer
 {
     private const float PanelWidth = 420;
     private const float PanelPadding = 10;
+    private const float ChatHistoryHeight = 224;
     private const int MessageLineLimit = 6;
     private static readonly Color TextColor = new("#f7f0e4");
     private static readonly Color AccentColor = new("#e3bc7d");
@@ -23,7 +24,13 @@ internal partial class CoordinationPanel : CanvasLayer
     private PanelContainer? _card;
     private Button _chatToggle = null!;
     private VBoxContainer _chat = null!;
+    private ScrollContainer _chatHistory = null!;
+    private VBoxContainer _historyRows = null!;
+    private Label _emptyHistory = null!;
+    private readonly Queue<ChatHistoryRow> _history = new();
+    private bool _historyScrollPending;
     private OptionButton _recipient = null!;
+    private HBoxContainer _chatInput = null!;
     private LineEdit _chatText = null!;
     private Button _sendChat = null!;
     private Label _chatError = null!;
@@ -44,13 +51,16 @@ internal partial class CoordinationPanel : CanvasLayer
     private bool _zh;
     private string EveryoneLabel => _zh ? "所有队友" : "Everyone";
 
+    private sealed record ChatHistoryRow(VBoxContainer Node, Label Author, string? Sender, string? Recipient, bool Broadcast);
+
     internal void Initialize() => BuildPanel();
 
     internal void SetLanguage(string language)
     {
         _zh = language == GameNameLocalization.SimplifiedChinese;
         _chatToggle.Text = _zh ? "聊天" : "Chat";
-        _chatToggle.TooltipText = _zh ? "给队友发消息" : "Message a teammate";
+        _chatToggle.TooltipText = _zh ? "查看聊天记录或发消息" : "Read chat history or send a message";
+        _emptyHistory.Text = _zh ? "还没有消息。" : "No messages yet.";
         _recipient.TooltipText = _zh ? "选择队友" : "Choose a teammate";
         _chatText.PlaceholderText = _zh ? "给队友发消息" : "Message your teammate";
         _sendChat.Text = _sendReply.Text = _zh ? "发送" : "Send";
@@ -61,6 +71,8 @@ internal partial class CoordinationPanel : CanvasLayer
         _replyText.PlaceholderText = _zh ? "回复队友" : "Reply to your teammate";
         if (_recipients.Count > 1)
             _recipient.SetItemText(_recipients.Count, EveryoneLabel);
+        foreach (var row in _history)
+            row.Author.Text = FormatChatAuthor(row);
     }
 
     internal void SetChatRecipients(IReadOnlyList<(ulong Id, string Name)> recipients)
@@ -75,7 +87,7 @@ internal partial class CoordinationPanel : CanvasLayer
             _recipient.AddItem(name);
         if (recipients.Count > 1)
             _recipient.AddItem(EveryoneLabel);
-        _chatToggle.Visible = recipients.Count > 0;
+        _chatToggle.Visible = recipients.Count > 0 || _history.Count > 0;
         int selectedIndex = 0;
         if (selectedId.HasValue)
         {
@@ -84,12 +96,16 @@ internal partial class CoordinationPanel : CanvasLayer
         }
         if (selectedIndex == recipients.Count)
         {
-            CloseChat();
+            if (_chatToggle.Visible)
+                ResetChatInput();
+            else
+                CloseChat();
             selectedIndex = 0;
         }
         if (recipients.Count > 0)
             _recipient.Select(selectedEveryone && recipients.Count > 1 ? recipients.Count : selectedIndex);
         _recipient.Visible = recipients.Count > 1;
+        _chatInput.Visible = recipients.Count > 0;
         UpdateVisibility();
     }
 
@@ -145,6 +161,77 @@ internal partial class CoordinationPanel : CanvasLayer
         UpdateVisibility();
     }
 
+    internal void AddChatMessage(string? sender, string? recipient, string text, bool broadcast)
+    {
+        bool follow = _chat.Visible && (_historyScrollPending || IsAtHistoryEnd());
+        var node = new VBoxContainer { MouseFilter = Control.MouseFilterEnum.Ignore };
+        node.AddThemeConstantOverride("separation", 2);
+        var author = new Label { AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        author.AddThemeColorOverride("font_color", AccentColor);
+        author.AddThemeFontSizeOverride("font_size", 16);
+        var row = new ChatHistoryRow(node, author, sender, recipient, broadcast);
+        author.Text = FormatChatAuthor(row);
+        node.AddChild(author);
+        node.AddChild(new Label { Text = text, AutowrapMode = TextServer.AutowrapMode.WordSmart });
+
+        if (_history.Count == CoordinationMod.RetainedEvents)
+        {
+            var oldest = _history.Dequeue().Node;
+            int removedHeight = (int)Mathf.Ceil(oldest.Size.Y) + _historyRows.GetThemeConstant("separation");
+            _historyRows.RemoveChild(oldest);
+            oldest.QueueFree();
+            if (_chat.Visible && !follow)
+                _chatHistory.ScrollVertical = Math.Max(0, _chatHistory.ScrollVertical - removedHeight);
+        }
+        _emptyHistory.Hide();
+        _history.Enqueue(row);
+        _historyRows.AddChild(node);
+
+        if (!_chat.Visible)
+            ShowMessage(author.Text, text);
+        else if (follow)
+            ScrollHistoryToEnd();
+    }
+
+    internal void ClearChatHistory()
+    {
+        while (_history.TryDequeue(out var row))
+        {
+            _historyRows.RemoveChild(row.Node);
+            row.Node.QueueFree();
+        }
+        _emptyHistory.Show();
+        _chatHistory.ScrollVertical = 0;
+        _messageTimer.Stop();
+        _message.Hide();
+        UpdateVisibility();
+    }
+
+    private string FormatChatAuthor(ChatHistoryRow row)
+    {
+        string sender = row.Sender ?? (_zh ? "你" : "You");
+        if (row.Broadcast)
+            return sender + (_zh ? " · 全队" : " · Party");
+        return row.Recipient == null ? sender + (_zh ? " · 私聊" : " · Direct") : $"{sender} → {row.Recipient}";
+    }
+
+    private bool IsAtHistoryEnd()
+    {
+        var scroll = _chatHistory.GetVScrollBar();
+        return scroll.MaxValue - scroll.Page - scroll.Value <= 8;
+    }
+
+    private async void ScrollHistoryToEnd()
+    {
+        if (_historyScrollPending || !IsInsideTree())
+            return;
+        _historyScrollPending = true;
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        _historyScrollPending = false;
+        if (_chat.Visible)
+            _chatHistory.ScrollVertical = (int)_chatHistory.GetVScrollBar().MaxValue;
+    }
+
     internal void ShowMessage(string senderName, string text)
     {
         BuildPanel();
@@ -197,6 +284,17 @@ internal partial class CoordinationPanel : CanvasLayer
 
         _chat = new VBoxContainer();
         content.AddChild(_chat);
+        _chatHistory = new ScrollContainer
+        {
+            CustomMinimumSize = new Vector2(0, ChatHistoryHeight),
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            VerticalScrollMode = ScrollContainer.ScrollMode.Auto
+        };
+        _chat.AddChild(_chatHistory);
+        _historyRows = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _chatHistory.AddChild(_historyRows);
+        _emptyHistory = new Label();
+        _historyRows.AddChild(_emptyHistory);
         _recipient = new OptionButton
         {
             ClipText = true,
@@ -204,8 +302,8 @@ internal partial class CoordinationPanel : CanvasLayer
             TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis
         };
         _chat.AddChild(_recipient);
-        var chatInput = new HBoxContainer();
-        _chat.AddChild(chatInput);
+        _chatInput = new HBoxContainer();
+        _chat.AddChild(_chatInput);
         _chatText = new LineEdit
         {
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
@@ -217,10 +315,10 @@ internal partial class CoordinationPanel : CanvasLayer
             _sendChat.Disabled = string.IsNullOrWhiteSpace(text);
             _chatError.Hide();
         };
-        chatInput.AddChild(_chatText);
+        _chatInput.AddChild(_chatText);
         _sendChat = new Button { Disabled = true };
         _sendChat.Pressed += SendChat;
-        chatInput.AddChild(_sendChat);
+        _chatInput.AddChild(_sendChat);
         _chatError = new Label();
         _chat.AddChild(_chatError);
         _chatError.Hide();
@@ -328,9 +426,13 @@ internal partial class CoordinationPanel : CanvasLayer
             UpdateVisibility();
             return;
         }
+        _messageTimer.Stop();
+        _message.Hide();
         _chat.Show();
         UpdateVisibility();
-        _chatText.GrabFocus();
+        ScrollHistoryToEnd();
+        if (_recipients.Count > 0)
+            _chatText.GrabFocus();
     }
 
     private void SendChat()
@@ -346,7 +448,8 @@ internal partial class CoordinationPanel : CanvasLayer
             _chatText.GrabFocus();
             return;
         }
-        CloseChat();
+        ResetChatInput();
+        _chatText.GrabFocus();
         UpdateVisibility();
     }
 
@@ -354,10 +457,15 @@ internal partial class CoordinationPanel : CanvasLayer
     {
         if (_chatText.HasFocus())
             _chatText.ReleaseFocus();
+        ResetChatInput();
+        _chat.Hide();
+    }
+
+    private void ResetChatInput()
+    {
         _chatText.Clear();
         _sendChat.Disabled = true;
         _chatError.Hide();
-        _chat.Hide();
     }
 
     private void DismissPrompt()

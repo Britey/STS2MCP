@@ -3,7 +3,7 @@
   "name": "STS2 Co-op Coordination",
   "author": "STS2MCP contributors",
   "description": "Co-op chat, quick replies, and party polls for Slay the Spire 2.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "has_pck": false,
   "has_dll": true,
   "affects_gameplay": true

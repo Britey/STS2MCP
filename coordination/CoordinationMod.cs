@@ -21,7 +21,7 @@ public static partial class CoordinationMod
     private const string Answered = "answered";
     private const string Expired = "expired";
     private const string Cancelled = "cancelled";
-    private const int RetainedEvents = 40;
+    internal const int RetainedEvents = 40;
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -164,6 +164,7 @@ public static partial class CoordinationMod
             _outgoingPoll = null;
             _partyLanguage = null;
             Messages.Clear();
+            _panel?.ClearChatHistory();
             TeammateLanguages.Clear();
             _chatRecipientIds = [];
             _panel?.SetChatRecipients([]);
@@ -595,11 +596,8 @@ public static partial class CoordinationMod
         Messages.Enqueue(entry);
         if (Messages.Count > RetainedEvents)
             Messages.Dequeue();
-        bool zh = _localLanguage == GameNameLocalization.SimplifiedChinese;
-        string sender = isLocal ? (zh ? "你" : "You") : GetName(envelope.From);
-        if (envelope.Broadcast)
-            sender += zh ? " · 全队" : " · Party";
-        _panel?.ShowMessage(sender, entry.Text);
+        _panel?.AddChatMessage(isLocal ? null : GetName(envelope.From),
+            isLocal && !entry.Broadcast ? GetName(envelope.To) : null, entry.Text, entry.Broadcast);
     }
 
     private static string GetName(ulong id)
