@@ -18,7 +18,7 @@ namespace STS2_MCP;
 [ModInitializer("Initialize")]
 public static partial class McpMod
 {
-    public const string Version = "0.4.0";
+    public const string Version = "0.5.0";
     public const int DefaultPort = 15526;
     private const string ConfigFileName = "STS2_MCP.conf";
 
@@ -36,15 +36,14 @@ public static partial class McpMod
     };
     private static readonly JsonSerializerOptions _compactJsonOptions = new(_jsonOptions) { WriteIndented = false };
 
+    private static string GetConfigPath() =>
+        Path.Combine(Path.GetDirectoryName(typeof(McpMod).Assembly.Location) ?? AppContext.BaseDirectory, ConfigFileName);
+
     private static (int Port, bool AllowProfileDelete) LoadConfig()
     {
         try
         {
-            string? modDir = Path.GetDirectoryName(
-                System.Reflection.Assembly.GetExecutingAssembly().Location);
-            if (modDir == null) return (DefaultPort, false);
-
-            string configPath = Path.Combine(modDir, ConfigFileName);
+            string configPath = GetConfigPath();
             if (!File.Exists(configPath))
             {
                 try
@@ -52,7 +51,8 @@ public static partial class McpMod
                     var defaultConfig = new Dictionary<string, object>
                     {
                         ["port"] = DefaultPort,
-                        ["allow_profile_delete"] = false
+                        ["allow_profile_delete"] = false,
+                        ["language"] = "game"
                     };
                     string json = JsonSerializer.Serialize(defaultConfig, _jsonOptions);
                     File.WriteAllText(configPath, json);
@@ -69,6 +69,13 @@ public static partial class McpMod
             using var doc = JsonDocument.Parse(content);
             bool allowProfileDelete = doc.RootElement.TryGetProperty("allow_profile_delete", out var deleteElem)
                 && deleteElem.ValueKind == JsonValueKind.True;
+            if (doc.RootElement.TryGetProperty("language", out var language))
+            {
+                if (language.ValueKind == JsonValueKind.String && TryParseNameLanguage(language.GetString(), out var nameLanguage))
+                    _configuredNameLanguage = nameLanguage;
+                else
+                    GD.PrintErr($"[STS2 MCP] Invalid 'language' in {configPath}, following the game language");
+            }
             if (doc.RootElement.TryGetProperty("port", out var portElem)
                 && portElem.TryGetInt32(out int port)
                 && port is > 0 and <= 65535)
@@ -90,6 +97,9 @@ public static partial class McpMod
     {
         try
         {
+            var (port, allowProfileDelete) = LoadConfig();
+            _allowProfileDelete = allowProfileDelete;
+
             // Optional settings UI patches should not block the HTTP bridge itself.
             TryApplyHarmonyPatches();
 
@@ -97,8 +107,6 @@ public static partial class McpMod
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(ProcessMainThreadQueue));
 
-            var (port, allowProfileDelete) = LoadConfig();
-            _allowProfileDelete = allowProfileDelete;
             string userDataDirectory = Godot.OS.GetUserDataDir();
             _apiAccess = LocalApiAccess.LoadOrCreate(userDataDirectory);
 
@@ -294,10 +302,14 @@ public static partial class McpMod
     private static void HandleGetMultiplayerState(HttpListenerRequest request, HttpListenerResponse response)
     {
         string format = request.QueryString["format"] ?? "json";
+        if (!TryReadCombatNameLanguage(request, response, out string? nameLanguage))
+            return;
+        bool usePartyLanguage = request.QueryString["language"] == null;
 
         try
         {
-            var stateTask = RunOnMainThread(() => BuildMultiplayerGameState());
+            var stateTask = RunOnMainThread(() => BuildMultiplayerGameState(
+                usePartyLanguage ? GetPartyNameLanguage() ?? nameLanguage : nameLanguage));
             var state = stateTask.GetAwaiter().GetResult();
 
             if (format == "markdown")
@@ -397,12 +409,14 @@ public static partial class McpMod
         string format = request.QueryString["format"] ?? "json";
         bool compact = bool.TryParse(request.QueryString["compact"], out bool compactValue) && compactValue;
         bool wait = bool.TryParse(request.QueryString["wait_for_ready"], out bool waitValue) && waitValue;
+        if (!TryReadCombatNameLanguage(request, response, out string? nameLanguage))
+            return;
 
         try
         {
             var state = wait
-                ? (await ReadReadyState(compact).ConfigureAwait(false)).State
-                : await RunOnMainThread(() => BuildGameState(compact)).ConfigureAwait(false);
+                ? (await ReadReadyState(compact, nameLanguage: nameLanguage).ConfigureAwait(false)).State
+                : await RunOnMainThread(() => BuildGameState(compact, nameLanguage)).ConfigureAwait(false);
 
             if (format == "markdown")
             {
@@ -496,7 +510,8 @@ public static partial class McpMod
             {
                 try
                 {
-                    var ready = await ReadReadyState(compact: true, action: wait).ConfigureAwait(false);
+                    var ready = await ReadReadyState(compact: true, action: wait, nameLanguage: _configuredNameLanguage)
+                        .ConfigureAwait(false);
                     result["state"] = ready.State;
                     if (ready.TimedOut)
                         result["state_wait_timed_out"] = true;

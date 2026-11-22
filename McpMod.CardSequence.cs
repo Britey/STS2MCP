@@ -195,11 +195,13 @@ public static partial class McpMod
         {
             if (wait == null)
             {
-                result["state"] = await RunOnMainThread(() => BuildGameState(compact: true)).ConfigureAwait(false);
+                result["state"] = await RunOnMainThread(() =>
+                    BuildGameState(compact: true, nameLanguage: _configuredNameLanguage)).ConfigureAwait(false);
             }
             else
             {
-                var ready = await ReadReadyState(compact: true, action: wait).ConfigureAwait(false);
+                var ready = await ReadReadyState(compact: true, action: wait, nameLanguage: _configuredNameLanguage)
+                    .ConfigureAwait(false);
                 result["state"] = ready.State;
                 if (ready.TimedOut)
                     result["state_wait_timed_out"] = true;

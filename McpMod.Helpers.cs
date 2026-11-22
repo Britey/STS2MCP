@@ -9,10 +9,12 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.HoverTips;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using Sts2Localization;
 
 namespace STS2_MCP;
 
@@ -113,15 +115,16 @@ public static partial class McpMod
             : null;
     }
 
-    internal static string? SafeGetText(Func<object?> getter)
+    internal static string? SafeGetText(Func<object?> getter, string? nameLanguage = null)
     {
         try
         {
             var result = getter();
             if (result == null) return null;
-            // If it's a LocString, call GetFormattedText
-            if (result is MegaCrit.Sts2.Core.Localization.LocString locString)
-                return StripRichTextTags(locString.GetFormattedText());
+            if (result is LocString locString)
+                return StripRichTextTags((nameLanguage != null && nameLanguage != LocManager.Instance.Language
+                    ? GameNameLocalization.Find(locString, nameLanguage) : null)
+                    ?? locString.GetFormattedText());
             return result.ToString();
         }
         catch { return null; }

@@ -4,10 +4,12 @@ using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.addons.mega_text;
 using MegaCrit.Sts2.Core.HoverTips;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Nodes.HoverTips;
 using MegaCrit.Sts2.Core.Nodes.Screens.Settings;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Settings;
+using Sts2Localization;
 
 namespace STS2_MCP;
 
@@ -78,6 +80,59 @@ public static partial class McpMod
         GD.Print("[STS2 MCP] Instant Mode checkbox injected into settings");
     }
 
+    private static void InjectNameLanguageSetting(NSettingsScreen settingsScreen)
+    {
+        var content = settingsScreen.GetNodeOrNull<NSettingsPanel>("%GeneralSettings")?.Content;
+        if (content == null || content.HasNode("McpLanguage"))
+            return;
+
+        var row = new HBoxContainer { Name = "McpLanguage" };
+        var label = new Label { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        var picker = new OptionButton { Name = "LanguagePicker" };
+        row.AddChild(label);
+        row.AddChild(picker);
+        content.AddChild(row);
+        if (!picker.GetThemeFont("font").HasChar('简') &&
+            ResourceLoader.Load<Font>("res://fonts/zhs/NotoSansMonoCJKsc-Regular.otf") is { } chineseFont)
+        {
+            var font = new FontVariation { BaseFont = picker.GetThemeFont("font"), Fallbacks = [chineseFont] };
+            label.AddThemeFontOverride("font", font);
+            picker.AddThemeFontOverride("font", font);
+            picker.GetPopup().AddThemeFontOverride("font", font);
+        }
+        if (content.GetNodeOrNull("FastMode") is Control fastMode)
+        {
+            row.CustomMinimumSize = new Vector2(0, fastMode.Size.Y);
+            content.MoveChild(row, fastMode.GetIndex() + 1);
+        }
+
+        string?[] languages = [null, "eng", GameNameLocalization.SimplifiedChinese];
+        void RefreshLabels()
+        {
+            bool zh = LocManager.Instance.Language == GameNameLocalization.SimplifiedChinese;
+            label.Text = zh ? "MCP 语言" : "MCP Language";
+            picker.TooltipText = zh ? "设置 MCP 中的敌人和状态名称及 AI 沟通语言。房主选择英语或简体中文时，全队使用该语言。"
+                : "Sets the language for MCP enemy and status names and AI coordination. In co-op, the host's English or Simplified Chinese choice applies to everyone.";
+            picker.Clear();
+            picker.AddItem(zh ? "跟随游戏" : "Follow Game");
+            picker.AddItem("English");
+            picker.AddItem("简体中文");
+            picker.Select(Array.IndexOf(languages, _configuredNameLanguage));
+        }
+
+        RefreshLabels();
+        settingsScreen.SettingsOpened += RefreshLabels;
+        picker.ItemSelected += index =>
+        {
+            if (SaveNameLanguage(languages[index]))
+                return;
+            picker.Select(Array.IndexOf(languages, _configuredNameLanguage));
+            picker.TooltipText = LocManager.Instance.Language == GameNameLocalization.SimplifiedChinese
+                ? "无法将语言设置保存到 STS2_MCP.conf。"
+                : "Could not save the language to STS2_MCP.conf.";
+        };
+    }
+
     // --- Harmony Patches ---
 
     [HarmonyPatch(typeof(NSettingsScreen), "_Ready")]
@@ -87,6 +142,8 @@ public static partial class McpMod
         {
             try { InjectInstantModeCheckbox(__instance); }
             catch (Exception ex) { GD.PrintErr($"[STS2 MCP] Settings UI injection failed: {ex}"); }
+            try { InjectNameLanguageSetting(__instance); }
+            catch (Exception ex) { GD.PrintErr($"[STS2 MCP] Language settings UI injection failed: {ex}"); }
         }
     }
 

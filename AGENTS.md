@@ -27,7 +27,9 @@
 ### Co-op Language
 
 - Read `mp_coordination_state().teammates` for each recipient's `player_slot` and `language`.
-- For `zhs`, write custom questions, choice labels, and chat in Simplified Chinese. Use `get_simplified_chinese_names` with game IDs for official names. Pass the original IDs to gameplay tools.
+- Use `mp_coordination_state().party_language` for all custom questions and messages when the host selected a shared language. Otherwise use `preferred_language` for questions and messages to the whole party.
+- For `zhs`, write custom questions, choice labels, and chat in Simplified Chinese. Read official enemy and status names with `mp_get_game_state(language="zh-CN")`, and use `get_simplified_chinese_names` for other game terms. Pass the original IDs to gameplay tools.
+- Check `player.status` and teammates' `players[].status` for effects already in play. Use an `any_yes` poll for capabilities the state cannot answer, such as “这回合有人能施加易伤吗？”
 - Omit the question and labels on built-in coordination choices to let the mod render standard wording and enemy names in the recipient's language.
 
 ---

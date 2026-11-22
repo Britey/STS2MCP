@@ -58,6 +58,9 @@ public static partial class McpMod
                 string aliveTag = p["is_alive"] is false ? " [DEAD]" : "";
                 string readyTag = p.TryGetValue("is_ready_to_end_turn", out var rdy) && rdy is true ? " [READY]" : "";
                 sb.AppendLine($"- Slot {p["player_slot"]} · **{p["character"]}**{youTag}{aliveTag}{readyTag} - HP: {p["hp"]}/{p["max_hp"]} | Gold: {p["gold"]}");
+                if (p.GetValueOrDefault("status") is List<Dictionary<string, object?>> powers && powers.Count > 0)
+                    sb.AppendLine("  - Status: " + string.Join(", ", powers.Select(power =>
+                        $"**{power["name"]}** ({FormatStatusAmount(power["amount"])})")));
 
                 // Show teammate pets inline
                 if (p.TryGetValue("pets", out var tPetsObj) && tPetsObj is List<Dictionary<string, object?>> tPets)

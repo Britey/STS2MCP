@@ -30,7 +30,7 @@ public static partial class McpMod
         GetInstanceFieldValue(hand, "_selectionCompletionSource");
 
     private static async Task<(Dictionary<string, object?> State, bool TimedOut)> ReadReadyState(
-        bool compact, CombatStateWait? action = null)
+        bool compact, CombatStateWait? action = null, string? nameLanguage = null)
     {
         var started = Stopwatch.GetTimestamp();
         var deadline = TimeSpan.FromSeconds(7);
@@ -40,7 +40,7 @@ public static partial class McpMod
             {
                 bool waiting = IsWaitingForPlayableState(action);
                 bool timedOut = waiting && Stopwatch.GetElapsedTime(started) >= deadline;
-                var state = !waiting || timedOut ? BuildGameState(compact) : null;
+                var state = !waiting || timedOut ? BuildGameState(compact, nameLanguage) : null;
                 return (State: state, TimedOut: timedOut);
             }).ConfigureAwait(false);
             if (result.State != null)

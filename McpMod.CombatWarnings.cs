@@ -4,8 +4,10 @@ using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
+using Sts2Localization;
 
 namespace STS2_MCP;
 
@@ -33,7 +35,7 @@ public static partial class McpMod
     }
 
     // Attach warnings after the full response state has been built, never during a readiness probe.
-    private static void AddCombatWarnings(Dictionary<string, object?> state, Creature? player)
+    private static void AddCombatWarnings(Dictionary<string, object?> state, Creature? player, string? nameLanguage)
     {
         if (player is not { IsAlive: true }
             || state.GetValueOrDefault("battle") is not Dictionary<string, object?> battle
@@ -45,6 +47,7 @@ public static partial class McpMod
             return;
 
         var reported = CombatWarningsByEncounter.GetOrCreateValue(combatState);
+        bool localizeNames = (nameLanguage ?? LocManager.Instance.Language) == GameNameLocalization.SimplifiedChinese;
         var warnings = new List<Dictionary<string, object?>>(pending.Count);
         foreach (var warning in pending.OrderByDescending(candidate => candidate.InterruptSequence))
         {
@@ -53,7 +56,7 @@ public static partial class McpMod
             var item = new Dictionary<string, object?>
             {
                 ["effect_id"] = warning.EffectId,
-                ["name"] = warning.Name,
+                ["name"] = (localizeNames ? GameNameLocalization.Find("power", warning.EffectId) : null) ?? warning.Name,
                 ["side"] = warning.Side,
                 ["message"] = warning.Message,
                 ["interrupt_sequence"] = warning.InterruptSequence

@@ -190,7 +190,12 @@ def _handle_error(e: Exception) -> str:
 
 
 @mcp.tool()
-async def get_game_state(format: str = "markdown", compact: bool = False, wait_for_ready: bool = False) -> str:
+async def get_game_state(
+    format: str = "markdown",
+    compact: bool = False,
+    wait_for_ready: bool = False,
+    language: Literal["game", "en", "zh-CN"] | None = None,
+) -> str:
     """Get the current Slay the Spire 2 game state.
 
     Returns the full game state including player stats, hand, enemies, potions, etc.
@@ -205,6 +210,8 @@ async def get_game_state(format: str = "markdown", compact: bool = False, wait_f
         compact: Keep pile counts and omit individual draw, discard, and exhaust cards.
         wait_for_ready: Wait up to seven seconds during combat or treasure transitions.
             Selection prompts and other screens return immediately. Check can_act or treasure readiness on return.
+        language: Override the MCP Language setting for enemy, pet, and active status names.
+            "zh-CN" uses Simplified Chinese, "en" uses English, and "game" follows the local client.
     """
     try:
         params = {"format": format}
@@ -212,6 +219,8 @@ async def get_game_state(format: str = "markdown", compact: bool = False, wait_f
             params["compact"] = "true"
         if wait_for_ready:
             params["wait_for_ready"] = "true"
+        if language is not None:
+            params["language"] = language
         return await _get(params, wait_for_ready=wait_for_ready)
     except Exception as e:
         return _handle_error(e)
@@ -914,7 +923,10 @@ async def crystal_sphere_proceed() -> str:
 
 
 @mcp.tool()
-async def mp_get_game_state(format: str = "markdown") -> str:
+async def mp_get_game_state(
+    format: str = "markdown",
+    language: Literal["game", "en", "zh-CN"] | None = None,
+) -> str:
     """[Multiplayer] Get the current multiplayer game state.
 
     Returns a summary of all players (HP, gold, alive status) plus full
@@ -926,12 +938,19 @@ async def mp_get_game_state(format: str = "markdown") -> str:
     On the map, use map.vote_phase and run.is_traveling to follow the party.
     run.map_coord is the actual location. Use treasure readiness fields before
     claiming, skipping, or proceeding.
+    In combat, read player.status for your effects, players[].status for
+    teammates' effects, and battle.enemies[].status for enemy effects.
 
     Args:
         format: "markdown" for human-readable output, "json" for structured data.
+        language: Override the MCP Language setting for enemy, pet, and active status names.
+            "zh-CN" uses Simplified Chinese, "en" uses English, and "game" follows the local client.
     """
     try:
-        return await _mp_get({"format": format})
+        params = {"format": format}
+        if language is not None:
+            params["language"] = language
+        return await _mp_get(params)
     except Exception as e:
         return _handle_error(e)
 
@@ -987,16 +1006,59 @@ async def mp_coordination_prompt(
 
 
 @mcp.tool()
+async def mp_coordination_poll(
+    options: Annotated[list[CoordinationOption] | None, Field(min_length=2, max_length=4)] = None,
+    question: Annotated[str | None, Field(min_length=1, max_length=140)] = None,
+    lifetime_seconds: Annotated[int, Field(ge=5, le=60)] = 25,
+    rule: Literal["most_votes", "any_yes"] = "most_votes",
+) -> str:
+    """[Multiplayer Coordination] Ask all connected teammates to vote in parallel.
+
+    Use most_votes for preferences. Supply 2–4 options. The highest tally
+    wins, and a tie opens a second ballot for the host with only the tied options.
+    If you are the host, reply to that incoming prompt yourself. Use named
+    custom choices for group turn order instead of teammate_first.
+
+    Use any_yes for questions such as "这回合有人能施加易伤吗？"
+    ("Can anyone apply Vulnerable this turn?"). Write the question in the
+    team's language. The built-in Yes and No labels use the host's language
+    choice when set, or each recipient's language under Follow Game.
+    Pass question and omit options for built-in Yes and No buttons. One Yes
+    wins immediately. No wins only if every teammate votes No. If some
+    teammates do not answer, the poll expires without resolving No.
+
+    Read mp_coordination_state().outgoing_poll. Hold the proposed action while
+    the poll is pending or waiting_for_host. Use winning_choice_index once
+    status is answered, refresh game state, and bind the action with poll_id
+    as coordination_prompt_id. A poll expires if combat changes, nobody votes,
+    or the host fails to break a tie in time.
+    """
+    try:
+        return await _mp_post({
+            "action": "coordination_poll",
+            "question": question,
+            "options": [option.model_dump(exclude_none=True) for option in options] if options is not None else None,
+            "lifetime_seconds": lifetime_seconds,
+            "rule": rule,
+        })
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
 async def mp_coordination_state(after_id: Annotated[int, Field(ge=0)] = 0) -> str:
     """[Multiplayer Coordination] Read your prompts and recent messages.
 
-    Returns the incoming and outgoing prompts and events after after_id. Use
+    Returns the incoming prompt, outgoing prompt or poll, and events after after_id. Use
     the returned latest_id for the next call within this run. This is a quick
     read. Allow a teammate time to respond between reads.
 
-    Look up the recipient in teammates by player_slot. If language is "zhs",
-    write custom prompts and chat in Simplified Chinese and use
-    get_simplified_chinese_names() for game terms. Standard prompts and
+    Use party_language when the host has selected a shared language.
+    Otherwise use preferred_language for custom polls and party chat, or
+    look up the recipient's language in teammates for direct messages.
+    For "zhs", write custom prompts and chat in Simplified Chinese. Copy enemy and
+    status names from mp_get_game_state(language="zh-CN"), or look up other
+    game terms with get_simplified_chinese_names(). Standard prompts and
     built-in reply labels can be generated in the recipient's language.
 
     Check for new events before committing to a turn or route. Human players
@@ -1025,7 +1087,8 @@ async def mp_coordination_reply(
     """[Multiplayer Coordination] Reply to your incoming prompt.
 
     Supply exactly one reply. Use a zero-based choice_index to select a
-    button, text when the prompt permits a text answer, or go_ahead=true
+    button from the current incoming prompt's options, text when the prompt permits
+    a text answer, or go_ahead=true
     after choosing to go first and completing your play. A reply changes
     coordination state without playing a card or ending anyone's turn.
     """
@@ -1047,19 +1110,25 @@ async def mp_coordination_reply(
 
 @mcp.tool()
 async def mp_coordination_message(
-    recipient_slot: Annotated[int, Field(ge=0)],
     text: Annotated[str, Field(min_length=1, max_length=200)],
+    recipient_slot: Annotated[int | None, Field(ge=0)] = None,
+    all_players: bool = False,
 ) -> str:
-    """[Multiplayer Coordination] Send a short text message to one teammate.
+    """[Multiplayer Coordination] Send a short text message to one teammate or everyone.
 
-    Recipient slot is the teammate's zero-based index in the state players
-    array. Use mp_coordination_reply() for a response to a specific prompt.
+    Pass the teammate's zero-based recipient_slot or set all_players=true to
+    message all connected teammates. Use mp_coordination_reply() for an answer
+    to a specific prompt. For Simplified Chinese speakers, write the message
+    in Simplified Chinese using official names from the game state or name lookup.
     """
+    if all_players == (recipient_slot is not None):
+        return "Error: supply recipient_slot or set all_players=true."
     try:
         return await _mp_post({
             "action": "coordination_message",
             "recipient_slot": recipient_slot,
             "text": text,
+            "all_players": all_players,
         })
     except Exception as e:
         return _handle_error(e)
@@ -1067,7 +1136,7 @@ async def mp_coordination_message(
 
 @mcp.tool()
 async def mp_coordination_cancel(prompt_id: Annotated[str, Field(min_length=1)]) -> str:
-    """[Multiplayer Coordination] Withdraw your outgoing prompt and free its slot."""
+    """[Multiplayer Coordination] Withdraw your outgoing prompt or poll by its ID."""
     try:
         return await _mp_post({"action": "coordination_cancel", "prompt_id": prompt_id})
     except Exception as e:

@@ -47,15 +47,25 @@ internal sealed record Reply(int? ChoiceIndex = null, string? Text = null, bool 
 }
 
 internal sealed record Envelope(string Kind, ulong To, ulong From = 0, string? PromptId = null,
-    Question? Question = null, Reply? Reply = null, string? Text = null, string? Language = null)
+    Question? Question = null, Reply? Reply = null, string? Text = null, string? Language = null,
+    string? PollId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    bool HostTiebreak = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    bool Broadcast = false,
+    string? PartyLanguage = null)
 {
     internal bool IsValid => To != From && (Kind switch
     {
         "message" => CoordinationMod.IsText(Text, 200),
-        "prompt" => HasPromptId && Question?.IsValid == true,
+        "prompt" => HasPromptId && Question?.IsValid == true && (PollId == null
+            ? !HostTiebreak
+            : Guid.TryParseExact(PollId, "N", out _) && !Question.AllowText &&
+              Question.Options.All(option => option.Kind != "teammate_first")),
         "reply" => HasPromptId && Reply?.IsValid == true,
         "cancel" or "complete" => HasPromptId,
-        "locale_hello" or "locale" => Language is { Length: 3 } && Language.All(char.IsAsciiLetterLower),
+        "locale_hello" or "locale" => Language is { Length: 3 } && Language.All(char.IsAsciiLetterLower) &&
+            PartyLanguage is null or "game" or "eng" or "zhs",
         _ => false
     });
 

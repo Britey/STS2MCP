@@ -1,6 +1,9 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text.Json.Nodes;
 using MegaCrit.Sts2.Core.Combat;
 using Sts2Localization;
 
@@ -8,6 +11,75 @@ namespace STS2_MCP;
 
 public static partial class McpMod
 {
+    private static volatile string? _configuredNameLanguage;
+
+    // The co-op companion reads the host's setting through this optional bridge.
+    public static string? GetConfiguredNameLanguage() => _configuredNameLanguage;
+
+    private static bool TryParseNameLanguage(string? value, out string? nameLanguage)
+    {
+        string? choice = value?.Trim().ToLowerInvariant();
+        nameLanguage = choice switch
+        {
+            "en" or "eng" => "eng",
+            "zh-cn" or GameNameLocalization.SimplifiedChinese => GameNameLocalization.SimplifiedChinese,
+            _ => null
+        };
+        return nameLanguage != null || choice is null or "game";
+    }
+
+    private static string NameLanguageSetting(string? nameLanguage) => nameLanguage switch
+    {
+        "eng" => "en",
+        GameNameLocalization.SimplifiedChinese => "zh-CN",
+        _ => "game"
+    };
+
+    private static bool TryReadCombatNameLanguage(HttpListenerRequest request, HttpListenerResponse response,
+        out string? nameLanguage)
+    {
+        if (request.QueryString["language"] is not { } language)
+        {
+            nameLanguage = _configuredNameLanguage;
+            return true;
+        }
+        if (TryParseNameLanguage(language, out nameLanguage))
+            return true;
+
+        SendError(response, 400, "Choose game, en, or zh-CN for language.");
+        return false;
+    }
+
+    private static bool SaveNameLanguage(string? nameLanguage)
+    {
+        string? temporaryPath = null;
+        try
+        {
+            string path = GetConfigPath();
+            var config = File.Exists(path)
+                ? JsonNode.Parse(File.ReadAllText(path))?.AsObject() ?? new JsonObject()
+                : new JsonObject { ["port"] = DefaultPort, ["allow_profile_delete"] = false };
+            config["language"] = NameLanguageSetting(nameLanguage);
+            temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(temporaryPath, config.ToJsonString(_jsonOptions));
+            File.Move(temporaryPath, path, overwrite: true);
+            _configuredNameLanguage = nameLanguage;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Godot.GD.PrintErr($"[STS2 MCP] Failed to save language: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            if (temporaryPath != null)
+                try { File.Delete(temporaryPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+        }
+    }
+
     private static void HandleGetChineseNames(HttpListenerRequest request, HttpListenerResponse response)
     {
         var entries = request.QueryString.GetValues("entry");

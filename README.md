@@ -1,188 +1,51 @@
+# STS2MCP
+
 <p align="center">
   <img src="docs/teaser.png" alt="STS2 MCP" width="90%" />
 </p>
 
-<p align="center"><em>An Experimental Research Project to Fully-Automate your Slay the Spire 2 Runs</em></p>
+STS2MCP lets an AI agent read and play Slay the Spire 2 in solo and co-op runs. Co-op Chat adds in-game messages, quick replies, and party polls for human and AI teammates.
 
-A mod for [**Slay the Spire 2**](https://store.steampowered.com/app/2868840/Slay_the_Spire_2/) that lets AI agents play the game. Exposes game state and actions via a localhost REST API, with an optional MCP server for Claude Desktop / Claude Code integration.
+## Choose what to install
 
-Singleplayer and multiplayer (co-op) supported, plus full menu and lobby control: profile switching, character select (SP and MP host/client) with optional seed, multiplayer host / Steam-friend join / FastMP localhost join, multiplayer load lobby for resuming saved co-op runs, game-over dismissal, FTUE/tutorial popup handling, and Timeline visibility. Tested against STS2 `v0.103.2`.
+| I want to… | Download | Start here |
+| --- | --- | --- |
+| Chat or vote as a human guest in co-op | **Co-op Chat** | [Player install guide](docs/chat-install.md) |
+| Let an AI agent play solo | **MCP** bridge and client | [MCP setup and agent guide](mcp/README.md) |
+| Play co-op with an AI teammate | **Co-op Chat** on every seat, plus **MCP** on each AI seat | [Co-op install guide](docs/chat-install.md) and [agent coordination guide](mcp/README.md#combat-coordination) |
 
-> [!warning]
-> This mod allows external programs to read and control your game via a localhost API. Use at your own risk with runs you care less about.
+Download the ZIPs from Britey's fork. The releases were tested on Windows with game version **v0.113.1**. The MCP bridge lets an authorized local client read and control the game. Co-op automation remains experimental. [GitHub releases](https://github.com/Britey/STS2MCP/releases)
 
-> [!caution]
-> Multiplayer support is in **beta** — expect bugs. Any multiplayer issues encountered with this mod installed are very likely caused by the mod, not the game. Please disable the mod and verify the issue persists before reporting bugs to the STS2 developers.
+## Reference
 
-## For Players
+- [Agent gameplay tips](AGENTS.md) cover state polling, targeting, and common decisions.
+- [Raw HTTP quick reference](docs/raw-simplified.md) and [full HTTP API](docs/raw-full.md) are available for agents that use the bridge directly.
 
-### 1. Install the Mod
+## Build from source
 
-Grab the [latest release](https://github.com/Gennadiyev/STS2MCP/releases/latest) and follow the instructions:
-
-1. Copy `STS2_MCP.dll` and `STS2_MCP.json` to `<game_install>/mods/`
-2. Launch the game and enable mods in settings (a consent dialog appears on first launch)
-3. The mod starts an HTTP server on `localhost:15526` automatically
-
-> [!note]
-> The release DLL is a platform-agnostic .NET assembly — the same `STS2_MCP.dll` and `STS2_MCP.json` work on Windows, Linux, and macOS. No separate builds are needed.
-
-#### macOS install
-
-On macOS, the mods directory lives inside the app bundle. The default Steam install path is:
-
-```
-~/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/
-    SlayTheSpire2.app/Contents/MacOS/mods/
-```
-
-To install, right-click `SlayTheSpire2.app` → **Show Package Contents**, navigate to `Contents/MacOS/`, and create a `mods` folder. Or from the terminal:
-
-```bash
-GAME_DIR="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2"
-MODS_DIR="$GAME_DIR/SlayTheSpire2.app/Contents/MacOS/mods"
-mkdir -p "$MODS_DIR"
-cp STS2_MCP.dll "$MODS_DIR/"
-cp STS2_MCP.json "$MODS_DIR/"
-```
-
-Launch the game and open **Settings → Mods**. The mod should appear in the list. A consent dialog appears on first launch — accept it to enable mod loading. Once enabled, verify the HTTP server is running:
-
-```bash
-curl -s http://localhost:15526/
-```
-
-A successful response looks like:
-
-```json
-{"message": "Hello from STS2 MCP v0.3.4", "status": "ok"}
-```
-
-If you get "Connection refused", the mod is not loaded — check that mods are enabled in the game's settings.
-
-### 2. Give Your AI Instructions to Interact with the Game
-
-**Clone or download the repository**, then:
-
-| I prefer a skill | I prefer an MCP Server |
-|---|---|
-| Tell AI to reference docs/raw-*.md. Sit back, and watch it play. | Requires [Python 3.11+](https://www.python.org/) and [uv](https://docs.astral.sh/uv/). Follow the instructions below ⬇️ |
-
-#### MCP server setup
-
-Install [uv](https://docs.astral.sh/uv/) if you don't have it (macOS: `brew install uv`). Then run the server once to install dependencies:
-
-```bash
-uv run --directory /path/to/STS2_MCP/mcp python server.py --help
-```
-
-`uv` reads `mcp/pyproject.toml`, creates an isolated virtual environment, and installs the pinned dependencies from `mcp/uv.lock`. Subsequent runs reuse the environment instantly.
-
-Add the server to your AI client's MCP config:
-
-```json
-{
-  "mcpServers": {
-    "sts2": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/STS2_MCP/mcp", "python", "server.py"]
-    }
-  }
-}
-```
-
-**Claude Code**: add to your project's `.mcp.json`.
-**Claude Desktop**: add to `claude_desktop_config.json` with the same config as above.
-*Other agents should have similar config options for custom MCP servers.*
-
-> [!tip]
-> On macOS, use the absolute path to `uv` (e.g. `/opt/homebrew/bin/uv`) in the `command` field. GUI-launched apps may not inherit your shell's `PATH`, which would prevent the server from starting.
-
-Restart your Claude session after adding the config. To verify the MCP server is working, ask Claude to call `get_game_state` — with the game running, it should return the current game state.
-
-The mod creates `STS2_MCP.token` in the game's per-user data directory on its first launch and logs the file path. On Windows the default is `%APPDATA%\SlayTheSpire2\STS2_MCP.token`. The MCP server reads the file on its first tool call. If the game uses a different data directory, add `--token-file` and the logged path to the MCP server's arguments.
-
-The MCP client connects directly to loopback. Use `--host` to select `localhost` or `127.0.0.1`, and `--port` if the mod uses a custom port. Raw HTTP clients need an `Authorization: Bearer <token>` header with the token file's contents for every game API call. The `GET /` health check is available without the token. Keep the token file private.
-
-### Profile and Compendium Data
-
-The HTTP API exposes profile-level progress separately from live run state:
-
-- `GET /api/v1/profile` returns the active profile's persistent progress summary, including discoveries, achievements, epochs, character totals, and global run totals.
-- `GET /api/v1/compendium` groups that progress into the same high-level sections as the in-game Compendium: Card Library, Relic Collection, Potion Lab, Bestiary, Character Stats, and Run History.
-- `GET /api/v1/wiki?query=...` searches discovered card and relic wiki entries for the active profile with fuzzy matching. Results are limited to 10 by default and can be overridden with `limit`; card results include base and upgraded variants when available.
-- `GET /api/v1/profiles` lists the three profile slots and the active profile.
-- `POST /api/v1/profiles` switches profile slots. Deleting an inactive slot requires setting `"allow_profile_delete": true` in `STS2_MCP.conf` beside the mod DLL and restarting the game.
-
-The MCP server exposes the same profile data through `get_profile()`, `get_compendium()`, `search_wiki(query, item_type, limit)`, `list_profiles()`, `switch_profile(profile_id)`, and `delete_profile(profile_id)`.
-
-`get_compendium()` is intended for agents that need durable context outside the current room or current run. It works from the main menu, includes a `current_run` block while a run is active, and summarizes saved `saves/history/*.run` files for the active profile. Run history is capped to the 20 most recent files in the response so long-lived profiles do not create unbounded tool output.
-
-`search_wiki()` is the selective lookup path for durable card and relic text. It never returns the full game catalog: the mod first filters to the active profile's discovered card and relic IDs, then returns only the best fuzzy matches. Use `item_type="card"` or `item_type="relic"` when the query is known, and raise `limit` only when the default 10 results are not enough.
-
-## For Developers
-
-### Build & Install
-
-Requires [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) and the base game.
-
-**PowerShell** (recommended):
+Install the base game and the [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0). From the repository root, point each project at the game installation.
 
 ```powershell
-# Pass game path directly:
-.\build.ps1 -GameDir "D:\SteamLibrary\steamapps\common\Slay the Spire 2"
-
-# Or set it once and forget:
-$env:STS2_GAME_DIR = "D:\SteamLibrary\steamapps\common\Slay the Spire 2"
-.\build.ps1
+.\build.ps1 -GameDir 'D:/SteamLibrary/steamapps/common/Slay the Spire 2'
+dotnet build coordination/STS2_Coordination.csproj -c Release -o out/STS2_Coordination '-p:STS2GameDir=D:/SteamLibrary/steamapps/common/Slay the Spire 2'
 ```
 
-The script builds `STS2_MCP.dll` into `out/STS2_MCP/`. Copy it along with the manifest JSON to `<game_install>/mods/` to install:
+The bridge DLL is in `out/STS2_MCP/`. Copy it into the game's `mods/STS2_MCP/` folder and copy `mod_manifest.json` there as `STS2_MCP.json`. Copy the chat DLL and `STS2_Coordination.json` from `out/STS2_Coordination/` into `mods/STS2_Coordination/`.
 
-```
-out/STS2_MCP/STS2_MCP.dll           ->  <game_install>/mods/STS2_MCP.dll
-mod_manifest.json                   ->  <game_install>/mods/STS2_MCP.json
-```
-
-### Build instructions for macOS
-
-Install dotnet to compile the mod:
-
-```bash
-brew install dotnet@9
-export DOTNET_ROOT="/opt/homebrew/opt/dotnet@9/libexec"
-export PATH="$DOTNET_ROOT:$PATH"
-```
-
-Homebrew installs `dotnet@9` as keg-only, so the exports above are required for the current session. Add them to `~/.zshrc` to persist across sessions.
-
-Build with `dotnet` directly (the PowerShell script is Windows-only):
-
-```bash
-dotnet build STS2_MCP.csproj -c Release -o out/STS2_MCP \
-  -p:STS2GameDir="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2"
-```
-
-On macOS the game ships as an app bundle. The `.csproj` detects macOS and resolves the data directory to `SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64` automatically.
-
-The mods directory on macOS lives inside the app bundle at `SlayTheSpire2.app/Contents/MacOS/mods/`. Finder hides bundle contents by default — to browse it in the GUI, right-click `SlayTheSpire2.app` → **Show Package Contents**. Or copy from the terminal:
+On macOS, use `dotnet build` directly for the bridge. The projects resolve the game assemblies inside `SlayTheSpire2.app`. The mods folder is `SlayTheSpire2.app/Contents/MacOS/mods/`.
 
 ```bash
 GAME_DIR="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2"
-MODS_DIR="$GAME_DIR/SlayTheSpire2.app/Contents/MacOS/mods"
-mkdir -p "$MODS_DIR"
-cp out/STS2_MCP/STS2_MCP.dll "$MODS_DIR/"
-cp mod_manifest.json "$MODS_DIR/STS2_MCP.json"
+dotnet build STS2_MCP.csproj -c Release -o out/STS2_MCP -p:STS2GameDir="$GAME_DIR"
+dotnet build coordination/STS2_Coordination.csproj -c Release -o out/STS2_Coordination -p:STS2GameDir="$GAME_DIR"
 ```
-
-> [!NOTE] 
-> `mod_manifest.json` is renamed to `STS2_MCP.json` on copy — the game's mod loader expects the manifest filename to match the mod ID.
 
 ## License
 
-MIT
+MIT. This fork is based on [Gennadiyev/STS2MCP](https://github.com/Gennadiyev/STS2MCP).
 
-## FAQ
+<details>
+<summary>Original project FAQ</summary>
 
 ### Why let the AI play the game for me?
 
@@ -212,3 +75,5 @@ The project is still too early to have a clear roadmap. My current focus is to m
 - Add support for in-game communication in multiplayer runs when collaborating with an AI agent
 - Self-reflection and learning from past runs to improve future performance
 - Benchmarking different models and agents is also on my mind
+
+</details>

@@ -18,7 +18,7 @@ internal partial class CoordinationPanel : CanvasLayer
     internal event Action<string, string>? TextReplied;
     internal event Action<string>? GoAheadSelected;
     internal event Action<string>? PromptDismissed;
-    internal event Func<ulong, string, bool>? ChatSent;
+    internal event Func<ulong?, string, bool>? ChatSent;
 
     private PanelContainer? _card;
     private Button _chatToggle = null!;
@@ -42,6 +42,7 @@ internal partial class CoordinationPanel : CanvasLayer
     private Timer _messageTimer = null!;
     private string? _promptId;
     private bool _zh;
+    private string EveryoneLabel => _zh ? "所有队友" : "Everyone";
 
     internal void Initialize() => BuildPanel();
 
@@ -58,16 +59,22 @@ internal partial class CoordinationPanel : CanvasLayer
         _replyToggle.Text = _zh ? "输入回复" : "Type a reply";
         _goAhead.Text = _zh ? "轮到你了" : "Go ahead";
         _replyText.PlaceholderText = _zh ? "回复队友" : "Reply to your teammate";
+        if (_recipients.Count > 1)
+            _recipient.SetItemText(_recipients.Count, EveryoneLabel);
     }
 
     internal void SetChatRecipients(IReadOnlyList<(ulong Id, string Name)> recipients)
     {
         BuildPanel();
-        ulong? selectedId = _recipient.Selected >= 0 ? _recipients[_recipient.Selected].Id : null;
+        int previous = _recipient.Selected;
+        bool selectedEveryone = _recipients.Count > 1 && previous == _recipients.Count;
+        ulong? selectedId = previous >= 0 && previous < _recipients.Count ? _recipients[previous].Id : null;
         _recipient.Clear();
         _recipients = recipients;
         foreach (var (_, name) in recipients)
             _recipient.AddItem(name);
+        if (recipients.Count > 1)
+            _recipient.AddItem(EveryoneLabel);
         _chatToggle.Visible = recipients.Count > 0;
         int selectedIndex = 0;
         if (selectedId.HasValue)
@@ -81,7 +88,7 @@ internal partial class CoordinationPanel : CanvasLayer
             selectedIndex = 0;
         }
         if (recipients.Count > 0)
-            _recipient.Select(selectedIndex);
+            _recipient.Select(selectedEveryone && recipients.Count > 1 ? recipients.Count : selectedIndex);
         _recipient.Visible = recipients.Count > 1;
         UpdateVisibility();
     }
@@ -330,9 +337,10 @@ internal partial class CoordinationPanel : CanvasLayer
     {
         string text = _chatText.Text.Trim();
         int index = _recipient.Selected;
-        if (text.Length == 0 || index < 0)
+        if (text.Length == 0 || index < 0 || index >= _recipient.ItemCount)
             return;
-        if (ChatSent?.Invoke(_recipients[index].Id, text) != true)
+        ulong? recipient = index < _recipients.Count ? _recipients[index].Id : null;
+        if (ChatSent?.Invoke(recipient, text) != true)
         {
             _chatError.Show();
             _chatText.GrabFocus();

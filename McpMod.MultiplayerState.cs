@@ -25,7 +25,7 @@ namespace STS2_MCP;
 
 public static partial class McpMod
 {
-    private static Dictionary<string, object?> BuildMultiplayerGameState()
+    private static Dictionary<string, object?> BuildMultiplayerGameState(string? nameLanguage)
     {
         var result = new Dictionary<string, object?>();
         var tree = Engine.GetMainLoop() as SceneTree;
@@ -144,12 +144,12 @@ public static partial class McpMod
                 {
                     result["state_type"] = "hand_select";
                     result["hand_select"] = BuildHandSelectState(playerHand, runState);
-                    result["battle"] = BuildMultiplayerBattleState(runState, combatRoom);
+                    result["battle"] = BuildMultiplayerBattleState(runState, nameLanguage);
                 }
                 else
                 {
                     result["state_type"] = combatRoom.RoomType.ToString().ToLower();
-                    result["battle"] = BuildMultiplayerBattleState(runState, combatRoom);
+                    result["battle"] = BuildMultiplayerBattleState(runState, nameLanguage);
                 }
             }
             else
@@ -158,7 +158,7 @@ public static partial class McpMod
                 if (IsMapScreenOpenOrVisible())
                 {
                     result["state_type"] = "map";
-                    result["map"] = BuildMultiplayerMapState(runState);
+                    result["map"] = BuildMultiplayerMapState(runState, nameLanguage);
                 }
                 else
                 {
@@ -172,7 +172,7 @@ public static partial class McpMod
             if (IsMapScreenOpenOrVisible())
             {
                 result["state_type"] = "map";
-                result["map"] = BuildMultiplayerMapState(runState);
+                result["map"] = BuildMultiplayerMapState(runState, nameLanguage);
             }
             else if (eventRoom.CanonicalEvent is FakeMerchant)
             {
@@ -182,20 +182,20 @@ public static partial class McpMod
             else
             {
                 result["state_type"] = "event";
-                result["event"] = BuildMultiplayerEventState(eventRoom, runState);
+                result["event"] = BuildMultiplayerEventState(eventRoom, runState, nameLanguage);
             }
         }
         else if (currentRoom is MapRoom)
         {
             result["state_type"] = "map";
-            result["map"] = BuildMultiplayerMapState(runState);
+            result["map"] = BuildMultiplayerMapState(runState, nameLanguage);
         }
         else if (currentRoom is MerchantRoom merchantRoom)
         {
             if (IsMapScreenOpenOrVisible())
             {
                 result["state_type"] = "map";
-                result["map"] = BuildMultiplayerMapState(runState);
+                result["map"] = BuildMultiplayerMapState(runState, nameLanguage);
             }
             else
             {
@@ -208,7 +208,7 @@ public static partial class McpMod
             if (IsMapScreenOpenOrVisible())
             {
                 result["state_type"] = "map";
-                result["map"] = BuildMultiplayerMapState(runState);
+                result["map"] = BuildMultiplayerMapState(runState, nameLanguage);
             }
             else
             {
@@ -221,12 +221,12 @@ public static partial class McpMod
             if (IsMapScreenOpenOrVisible())
             {
                 result["state_type"] = "map";
-                result["map"] = BuildMultiplayerMapState(runState);
+                result["map"] = BuildMultiplayerMapState(runState, nameLanguage);
             }
             else
             {
                 result["state_type"] = "treasure";
-                result["treasure"] = BuildMultiplayerTreasureState(treasureRoom, runState);
+                result["treasure"] = BuildMultiplayerTreasureState(treasureRoom, runState, nameLanguage);
             }
         }
         else
@@ -247,20 +247,20 @@ public static partial class McpMod
         };
 
         // All players summary (always included for multiplayer)
-        result["players"] = BuildAllPlayersState(runState);
+        result["players"] = BuildAllPlayersState(runState, nameLanguage);
 
         // Always include full local player data (relics, potions, deck, etc.) on every screen,
         // matching singleplayer behavior from BuildGameState()
         if (localPlayer != null)
         {
-            result["player"] = BuildPlayerState(localPlayer);
+            result["player"] = BuildPlayerState(localPlayer, nameLanguage: nameLanguage);
         }
 
-        AddCombatWarnings(result, localPlayer?.Creature);
+        AddCombatWarnings(result, localPlayer?.Creature, nameLanguage);
         return result;
     }
 
-    private static Dictionary<string, object?> BuildMultiplayerBattleState(RunState runState, CombatRoom combatRoom)
+    private static Dictionary<string, object?> BuildMultiplayerBattleState(RunState runState, string? nameLanguage)
     {
         var combatState = CombatManager.Instance.DebugOnlyGetState();
         var battle = new Dictionary<string, object?>();
@@ -279,12 +279,12 @@ public static partial class McpMod
         battle["can_undo_end_turn"] = GetUndoEndTurnBlock(localPlayer) == null;
         battle["all_players_ready"] = CombatManager.Instance.AllPlayersReadyToEndTurn();
 
-        battle["enemies"] = BuildEnemiesState(combatState);
+        battle["enemies"] = BuildEnemiesState(combatState, nameLanguage);
 
         return battle;
     }
 
-    private static Dictionary<string, object?> BuildMultiplayerMapState(RunState runState)
+    private static Dictionary<string, object?> BuildMultiplayerMapState(RunState runState, string? nameLanguage)
     {
         // Start with the standard map state
         var state = BuildMapState(runState);
@@ -322,7 +322,7 @@ public static partial class McpMod
         }
 
         // All players summary
-        state["players"] = BuildAllPlayersState(runState);
+        state["players"] = BuildAllPlayersState(runState, nameLanguage);
 
         return state;
     }
@@ -330,7 +330,7 @@ public static partial class McpMod
     private static bool IsMultiplayerMapTraveling() =>
         RunManager.Instance.IsChangingRooms || NMapScreen.Instance?.IsTraveling == true;
 
-    private static Dictionary<string, object?> BuildMultiplayerEventState(EventRoom eventRoom, RunState runState)
+    private static Dictionary<string, object?> BuildMultiplayerEventState(EventRoom eventRoom, RunState runState, string? nameLanguage)
     {
         // Start with the standard event state
         var state = BuildEventState(eventRoom, runState);
@@ -367,12 +367,12 @@ public static partial class McpMod
         }
 
         // All players summary
-        state["players"] = BuildAllPlayersState(runState);
+        state["players"] = BuildAllPlayersState(runState, nameLanguage);
 
         return state;
     }
 
-    private static Dictionary<string, object?> BuildMultiplayerTreasureState(TreasureRoom treasureRoom, RunState runState)
+    private static Dictionary<string, object?> BuildMultiplayerTreasureState(TreasureRoom treasureRoom, RunState runState, string? nameLanguage)
     {
         // Auto-open chest same as singleplayer. BeginRelicPicking() runs during
         // TreasureRoom.Enter(), so relics are already generated. The chest click
@@ -412,12 +412,12 @@ public static partial class McpMod
         }
 
         // All players summary
-        state["players"] = BuildAllPlayersState(runState);
+        state["players"] = BuildAllPlayersState(runState, nameLanguage);
 
         return state;
     }
 
-    private static List<Dictionary<string, object?>> BuildAllPlayersState(RunState runState)
+    private static List<Dictionary<string, object?>> BuildAllPlayersState(RunState runState, string? nameLanguage)
     {
         bool inCombat = CombatManager.Instance.IsInProgress;
         var players = new List<Dictionary<string, object?>>();
@@ -439,10 +439,11 @@ public static partial class McpMod
                 entry["block"] = player.Creature.Block;
                 entry["is_ready_to_end_turn"] = CombatManager.Instance.IsPlayerReadyToEndTurn(player);
 
-                // Include pets for teammates (local player's pets are under "player")
-                if (!LocalContext.IsMe(player))
+                // Local powers and pets are already included under "player".
+                if (entry["is_local"] is false)
                 {
-                    var pets = BuildPetsState(player);
+                    entry["status"] = BuildPowersState(player.Creature, nameLanguage);
+                    var pets = BuildPetsState(player, nameLanguage);
                     if (pets.Count > 0)
                     {
                         entry["pets"] = pets;

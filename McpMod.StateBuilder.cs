@@ -62,7 +62,7 @@ namespace STS2_MCP;
 
 public static partial class McpMod
 {
-    private static Dictionary<string, object?> BuildGameState(bool compact = false)
+    private static Dictionary<string, object?> BuildGameState(bool compact = false, string? nameLanguage = null)
     {
         var result = new Dictionary<string, object?>();
         var tree = (Godot.Engine.GetMainLoop()) as SceneTree;
@@ -488,12 +488,12 @@ public static partial class McpMod
                 {
                     result["state_type"] = "hand_select";
                     result["hand_select"] = BuildHandSelectState(playerHand, runState);
-                    result["battle"] = BuildBattleState(runState, combatRoom);
+                    result["battle"] = BuildBattleState(runState, combatRoom, nameLanguage);
                 }
                 else
                 {
                     result["state_type"] = combatRoom.RoomType.ToString().ToLower(); // monster, elite, boss
-                    result["battle"] = BuildBattleState(runState, combatRoom);
+                    result["battle"] = BuildBattleState(runState, combatRoom, nameLanguage);
                 }
             }
             else
@@ -606,10 +606,10 @@ public static partial class McpMod
         var _player = LocalContext.GetMe(runState);
         if (_player != null)
         {
-            result["player"] = BuildPlayerState(_player, compact);
+            result["player"] = BuildPlayerState(_player, compact, nameLanguage);
         }
 
-        AddCombatWarnings(result, _player?.Creature);
+        AddCombatWarnings(result, _player?.Creature, nameLanguage);
         return result;
     }
 
@@ -1081,7 +1081,7 @@ public static partial class McpMod
         result["message"] = "Multiplayer load lobby. Confirm to ready up; once everyone is connected and ready, the run resumes.";
     }
 
-    private static Dictionary<string, object?> BuildBattleState(RunState runState, CombatRoom combatRoom)
+    private static Dictionary<string, object?> BuildBattleState(RunState runState, CombatRoom combatRoom, string? nameLanguage)
     {
         var combatState = CombatManager.Instance.DebugOnlyGetState();
         var battle = new Dictionary<string, object?>();
@@ -1097,12 +1097,12 @@ public static partial class McpMod
         battle["is_play_phase"] = IsPlayPhase(combatState);
         AddCombatReadiness(battle, LocalContext.GetMe(runState));
 
-        battle["enemies"] = BuildEnemiesState(combatState);
+        battle["enemies"] = BuildEnemiesState(combatState, nameLanguage);
 
         return battle;
     }
 
-    private static Dictionary<string, object?> BuildPlayerState(Player player, bool compact = false)
+    private static Dictionary<string, object?> BuildPlayerState(Player player, bool compact = false, string? nameLanguage = null)
     {
         var state = new Dictionary<string, object?>();
         var creature = player.Creature;
@@ -1192,7 +1192,7 @@ public static partial class McpMod
                 state["orb_empty_slots"] = orbQueue.Capacity - orbQueue.Orbs.Count;
             }
 
-            var pets = BuildPetsState(player);
+            var pets = BuildPetsState(player, nameLanguage);
             if (pets.Count > 0)
             {
                 state["pets"] = pets;
@@ -1214,7 +1214,7 @@ public static partial class McpMod
             state["wongo_points"] = player.ExtraFields.WongoPoints;
 
         // Powers (status effects)
-        state["status"] = BuildPowersState(creature);
+        state["status"] = BuildPowersState(creature, nameLanguage);
 
         // Relics
         var relics = new List<Dictionary<string, object?>>();
@@ -1425,12 +1425,12 @@ public static partial class McpMod
         return list;
     }
 
-    private static List<Dictionary<string, object?>> BuildEnemiesState(ICombatState combatState) =>
+    private static List<Dictionary<string, object?>> BuildEnemiesState(ICombatState combatState, string? nameLanguage) =>
         GetLivingEnemies(combatState)
-            .Select(enemy => BuildEnemyState(enemy.Creature, enemy.EntityId))
+            .Select(enemy => BuildEnemyState(enemy.Creature, enemy.EntityId, nameLanguage))
             .ToList();
 
-    private static Dictionary<string, object?> BuildEnemyState(Creature creature, string entityId)
+    private static Dictionary<string, object?> BuildEnemyState(Creature creature, string entityId, string? nameLanguage)
     {
         var monster = creature.Monster;
 
@@ -1438,11 +1438,11 @@ public static partial class McpMod
         {
             ["entity_id"] = entityId,
             ["combat_id"] = creature.CombatId,
-            ["name"] = SafeGetText(() => monster?.Title),
+            ["name"] = SafeGetText(() => monster?.Title, nameLanguage),
             ["hp"] = creature.CurrentHp,
             ["max_hp"] = creature.MaxHp,
             ["block"] = creature.Block,
-            ["status"] = BuildPowersState(creature)
+            ["status"] = BuildPowersState(creature, nameLanguage)
         };
 
         // Intents
@@ -2506,7 +2506,7 @@ public static partial class McpMod
         _ => reward.GetType().Name.ToLower()
     };
 
-    private static List<Dictionary<string, object?>> BuildPowersState(Creature creature)
+    private static List<Dictionary<string, object?>> BuildPowersState(Creature creature, string? nameLanguage)
     {
         var powers = new List<Dictionary<string, object?>>();
         foreach (var power in creature.Powers)
@@ -2539,7 +2539,7 @@ public static partial class McpMod
                 powers.Add(new Dictionary<string, object?>
                 {
                     ["id"] = power.Id.Entry,
-                    ["name"] = SafeGetText(() => power.Title),
+                    ["name"] = SafeGetText(() => power.Title, nameLanguage),
                     ["amount"] = power.DisplayAmount,
                     ["type"] = power.Type.ToString(),
                     ["description"] = resolvedDesc,
@@ -2551,7 +2551,7 @@ public static partial class McpMod
         return powers;
     }
 
-    private static List<Dictionary<string, object?>> BuildPetsState(Player player)
+    private static List<Dictionary<string, object?>> BuildPetsState(Player player, string? nameLanguage)
     {
         var pets = new List<Dictionary<string, object?>>();
         var combatState = player.PlayerCombatState;
@@ -2562,13 +2562,13 @@ public static partial class McpMod
             pets.Add(new Dictionary<string, object?>
             {
                 ["id"] = pet.Monster?.Id.Entry,
-                ["name"] = SafeGetText(() => pet.Monster?.Title) ?? pet.Name,
+                ["name"] = SafeGetText(() => pet.Monster?.Title, nameLanguage) ?? pet.Name,
                 ["alive"] = pet.IsAlive,
                 ["is_interactable"] = pet.Monster?.IsInteractable ?? true,
                 ["hp"] = pet.CurrentHp,
                 ["max_hp"] = pet.MaxHp,
                 ["block"] = pet.Block,
-                ["status"] = BuildPowersState(pet)
+                ["status"] = BuildPowersState(pet, nameLanguage)
             });
         }
 

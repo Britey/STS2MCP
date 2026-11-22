@@ -14,7 +14,7 @@ using Sts2Localization;
 namespace Sts2Coordination;
 
 [ModInitializer(nameof(Initialize))]
-public static class CoordinationMod
+public static partial class CoordinationMod
 {
     private const string Pending = "pending";
     private const string Waiting = "waiting_for_teammate";
@@ -33,7 +33,7 @@ public static class CoordinationMod
         bool AllowText = true, int LifetimeSeconds = 25);
     private sealed record StateInput(int AfterId = 0);
     private sealed record ReplyInput(string PromptId, int? ChoiceIndex, string? Text, bool GoAhead);
-    private sealed record MessageInput(int RecipientSlot, string Text);
+    private sealed record MessageInput(int? RecipientSlot, string Text, bool AllPlayers = false);
     private sealed record PromptRef(string PromptId, uint? CombatTargetId);
 
     private sealed class Prompt(Envelope envelope, CombatId? combatId)
@@ -51,7 +51,7 @@ public static class CoordinationMod
         internal Choice? SelectedChoice => Reply?.ChoiceIndex is int index ? Question.Options[index] : null;
     }
 
-    private sealed record MessageEvent(int Id, int? SenderSlot, int? RecipientSlot, string Text, bool IsLocal);
+    private sealed record MessageEvent(int Id, int? SenderSlot, int? RecipientSlot, string Text, bool IsLocal, bool Broadcast);
 
     private static CoordinationPanel? _panel;
     private static INetGameService? _network;
@@ -61,6 +61,8 @@ public static class CoordinationMod
     private static readonly List<ulong> ConnectedTeammates = [];
     private static readonly Dictionary<ulong, string> TeammateLanguages = [];
     private static string _localLanguage = "eng";
+    private static string? _partyLanguage;
+    private static Func<string?>? _getConfiguredNameLanguage;
     private static ulong[] _chatRecipientIds = [];
     private static readonly Queue<MessageEvent> Messages = new();
     private static int _nextEventId;
@@ -76,10 +78,22 @@ public static class CoordinationMod
         panel.TextReplied += (id, text) => ReplyFromPanel(id, new(Text: text));
         panel.GoAheadSelected += id => ReplyFromPanel(id, new(GoAhead: true));
         panel.PromptDismissed += id => CancelPrompt(id);
-        panel.ChatSent += TrySendText;
+        panel.ChatSent += (recipient, text) => recipient is ulong id
+            ? TrySendText(id, text)
+            : BroadcastText(text).Length > 0;
         _panel = panel;
         tree.Root.CallDeferred(Node.MethodName.AddChild, panel);
         tree.ProcessFrame += OnFrame;
+    }
+
+    // Read on the game thread by the MCP bridge.
+    public static string? GetPartyNameLanguage()
+    {
+        var manager = RunManager.Instance;
+        return _network is { IsConnected: true } && !manager.IsCleaningUp &&
+            ReferenceEquals(manager.NetService, _network) && ReferenceEquals(manager.DebugOnlyGetState(), _run)
+            ? (_network is NetHostGameService ? _getConfiguredNameLanguage?.Invoke() : _partyLanguage)
+            : null;
     }
 
     // Called on the main thread by the optional MCP bridge.
@@ -94,6 +108,7 @@ public static class CoordinationMod
             {
                 "coordination_state" => GetState(Decode<StateInput>(payload).AfterId),
                 "coordination_prompt" => CreatePrompt(Decode<PromptInput>(payload)),
+                "coordination_poll" => CreatePoll(Decode<PollInput>(payload)),
                 "coordination_reply" => SendReply(Decode<ReplyInput>(payload)),
                 "coordination_message" => SendText(Decode<MessageInput>(payload)),
                 "coordination_cancel" => CancelPrompt(Decode<PromptRef>(payload).PromptId),
@@ -146,6 +161,8 @@ public static class CoordinationMod
             if (_incoming != null)
                 _panel?.ClearPrompt(_incoming.Id);
             _incoming = _outgoing = null;
+            _outgoingPoll = null;
+            _partyLanguage = null;
             Messages.Clear();
             TeammateLanguages.Clear();
             _chatRecipientIds = [];
@@ -153,13 +170,24 @@ public static class CoordinationMod
             _run = run;
             _network = network;
             _network?.RegisterMessageHandler<CoordinationMessage>(Receive);
+            _getConfiguredNameLanguage = _network is NetHostGameService
+                ? AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(assembly => assembly.GetName().Name == "STS2_MCP")
+                    ?.GetType("STS2_MCP.McpMod")?.GetMethod("GetConfiguredNameLanguage")?.CreateDelegate<Func<string?>>()
+                : null;
         }
         if (_network == null)
             return;
+        if (_network is NetHostGameService)
+        {
+            string? current = _getConfiguredNameLanguage?.Invoke();
+            languageChanged |= _partyLanguage != current;
+            _partyLanguage = current;
+        }
         UpdateChatRecipients(_run!, _network.NetId, languageChanged);
 
         if (_incoming is { IsOpen: true } incoming && !IsCurrent(incoming))
             Finish(incoming, Expired);
+        TickPoll();
         if (_outgoing is not { } outgoing || outgoing.Status is Cancelled or Expired)
             return;
         if (!IsCurrent(outgoing))
@@ -189,13 +217,16 @@ public static class CoordinationMod
             foreach (ulong id in TeammateLanguages.Keys.Except(_chatRecipientIds).ToArray())
                 TeammateLanguages.Remove(id);
             foreach (ulong id in newcomers)
-                Transmit(new("locale_hello", id, Language: _localLanguage));
+                Transmit(LocaleEnvelope("locale_hello", id));
             _panel?.SetChatRecipients(_chatRecipientIds.Select(id => (id, GetName(id))).ToArray());
         }
         if (languageChanged)
             foreach (ulong id in _chatRecipientIds)
-                Transmit(new("locale", id, Language: _localLanguage));
+                Transmit(LocaleEnvelope("locale", id));
     }
+
+    private static Envelope LocaleEnvelope(string kind, ulong recipient) => new(kind, recipient, Language: _localLanguage,
+        PartyLanguage: _network is NetHostGameService ? _partyLanguage ?? "game" : null);
 
     private static Player? FindPlayer(ulong playerId) => _run?.Players.FirstOrDefault(p => p.NetId == playerId);
 
@@ -273,6 +304,8 @@ public static class CoordinationMod
         }
         else
         {
+            if (envelope.PartyLanguage != null)
+                return;
             envelope = envelope with { From = senderId };
         }
         if (!envelope.IsValid || !IsConnected(envelope.From) || !IsConnected(envelope.To))
@@ -289,21 +322,23 @@ public static class CoordinationMod
         switch (envelope.Kind)
         {
             case "locale_hello":
-                TeammateLanguages[envelope.From] = envelope.Language!;
-                Transmit(new("locale", envelope.From, Language: _localLanguage));
-                break;
             case "locale":
                 TeammateLanguages[envelope.From] = envelope.Language!;
+                if (_network is NetClientGameService hostConnection && envelope.From == hostConnection.HostNetId)
+                    _partyLanguage = envelope.PartyLanguage is "eng" or "zhs" ? envelope.PartyLanguage : null;
+                if (envelope.Kind == "locale_hello")
+                    Transmit(LocaleEnvelope("locale", envelope.From));
                 break;
             case "prompt":
                 AcceptPrompt(envelope);
                 break;
             case "reply":
-                if (_outgoing is { IsOpen: true } outgoing && outgoing.Id == envelope.PromptId &&
+                if (!ReceivePollReply(envelope) && _outgoing is { IsOpen: true } outgoing && outgoing.Id == envelope.PromptId &&
                     outgoing.Envelope.To == envelope.From)
                     ApplyReply(outgoing, envelope.Reply!);
                 break;
             case "cancel":
+                ReceivePollDecline(envelope);
                 if (_outgoing is { IsOpen: true } cancelled && cancelled.Id == envelope.PromptId &&
                     cancelled.Envelope.To == envelope.From)
                     Finish(cancelled, Cancelled);
@@ -324,8 +359,8 @@ public static class CoordinationMod
 
     private static object CreatePrompt(PromptInput input)
     {
-        if (_outgoing is { IsOpen: true })
-            return Error("Wait for the current prompt or cancel it first.", "prompt_pending");
+        if (HasOpenOutgoingCoordination())
+            return Error("Wait for the current prompt or poll, or cancel it first.", "prompt_pending");
         if (!TryRecipient(input.RecipientSlot, out ulong recipient))
             return Error("Choose a connected teammate by player slot.", "recipient_unavailable");
         ulong origin = _network!.NetId;
@@ -334,12 +369,7 @@ public static class CoordinationMod
         if (input.Options is not { Length: >= 2 and <= 4 } choices || choices.Any(choice => choice == null))
             return Error("Provide 2–4 coordination choices.");
 
-        bool zh = TeammateLanguages.GetValueOrDefault(recipient, _localLanguage) == GameNameLocalization.SimplifiedChinese;
-        var options = choices.Select(choice => choice.Label == null
-            ? choice with { Label = GetDefaultChoiceLabel(choice, zh) }
-            : choice).ToArray();
-        string questionText = input.Question?.Trim() ?? (zh ? "这回合怎么配合？" : "How should we coordinate this turn?");
-        var question = new Question(questionText, options, input.AllowText, input.LifetimeSeconds, scope);
+        var question = BuildQuestion(recipient, input.Question, choices, input.AllowText, input.LifetimeSeconds, scope);
         if (!question.IsValid)
             return Error("Use a question up to 140 characters and 2–4 choices up to 40 characters, with a lifetime of 5–60 seconds.");
         var envelope = new Envelope("prompt", recipient, origin, Guid.NewGuid().ToString("N"), question);
@@ -348,6 +378,20 @@ public static class CoordinationMod
             return Error("The team or combat changed before the prompt could be sent.", "prompt_stale");
         _outgoing = prompt;
         return new { status = "ok", outgoing_prompt = Describe(prompt) };
+    }
+
+    private static bool UsesChinese(ulong recipient) =>
+        (_partyLanguage ?? TeammateLanguages.GetValueOrDefault(recipient, _localLanguage)) == GameNameLocalization.SimplifiedChinese;
+
+    private static Question BuildQuestion(ulong recipient, string? text, Choice[] choices, bool allowText,
+        int lifetimeSeconds, CombatScope scope)
+    {
+        bool zh = UsesChinese(recipient);
+        var options = choices.Select(choice => choice.Label == null
+            ? choice with { Label = GetDefaultChoiceLabel(choice, zh) }
+            : choice).ToArray();
+        string questionText = text?.Trim() ?? (zh ? "这回合怎么配合？" : "How should we coordinate this turn?");
+        return new(questionText, options, allowText, lifetimeSeconds, scope);
     }
 
     private static string? GetDefaultChoiceLabel(Choice choice, bool zh) => choice.Kind switch
@@ -384,7 +428,8 @@ public static class CoordinationMod
         if (_incoming?.Id == envelope.PromptId)
             return;
         var prompt = new Prompt(envelope, CombatManager.Instance.CurrentCombatId);
-        if ((_incoming?.IsOpen ?? false) || !IsCurrent(prompt))
+        if ((_incoming?.IsOpen ?? false) || !IsCurrent(prompt) ||
+            (envelope.HostTiebreak && _network!.NetId != HostId))
         {
             Transmit(new("cancel", envelope.From, PromptId: prompt.Id));
             return;
@@ -402,6 +447,8 @@ public static class CoordinationMod
             return Error("Choose one available reply.");
         if (reply.ChoiceIndex is int index && prompt.Question.Options[index].Kind == "teammate_first")
             reply = reply with { CompletedPlays = CountCompletedPlays(prompt.Envelope.To) };
+        if (TryCompleteLocalTiebreak(prompt, reply))
+            return new { status = "ok", incoming_prompt = Describe(prompt) };
         if (!Transmit(new("reply", prompt.Envelope.From, PromptId: prompt.Id, Reply: reply)))
             return Error("The teammate is no longer connected.", "recipient_unavailable");
         ApplyReply(prompt, reply);
@@ -444,6 +491,12 @@ public static class CoordinationMod
 
     private static object CancelPrompt(string id)
     {
+        if (_outgoingPoll is { IsOpen: true } poll &&
+            (poll.Id == id || IsLocalTiebreak(poll, id)))
+        {
+            StopPoll(poll, Cancelled);
+            return new { status = "ok" };
+        }
         if (_outgoing is { IsOpen: true } outgoing && outgoing.Id == id)
         {
             Finish(outgoing, Cancelled);
@@ -459,9 +512,15 @@ public static class CoordinationMod
         return Error("That prompt is no longer open.", "prompt_stale");
     }
 
-    private static void ShowIncoming(Prompt prompt) => _panel?.ShowPrompt(prompt.Id, GetName(prompt.Envelope.From),
-        prompt.Question.Text, prompt.Question.Options.Select(option => option.Label!).ToArray(),
-        prompt.Question.AllowText, prompt.Status == Waiting);
+    private static void ShowIncoming(Prompt prompt)
+    {
+        string sender = GetName(prompt.Envelope.From);
+        if (prompt.Envelope.PollId != null)
+            sender += UsesChinese(_network!.NetId) ? " · 全队投票" : " · Team poll";
+        _panel?.ShowPrompt(prompt.Id, sender, prompt.Question.Text,
+            prompt.Question.Options.Select(option => option.Label!).ToArray(),
+            prompt.Question.AllowText, prompt.Status == Waiting);
+    }
 
     private static void Finish(Prompt prompt, string status, string? release = null)
     {
@@ -473,16 +532,32 @@ public static class CoordinationMod
 
     private static object ValidateAnswer(PromptRef request)
     {
-        if (_outgoing is not { } prompt || prompt.Id != request.PromptId || prompt.Status != Answered)
+        var choice = _outgoingPoll is { Status: Answered, Winner: int winner } poll && poll.Id == request.PromptId
+            ? poll.Question.Options[winner]
+            : null;
+        if (_outgoing is { Status: Answered } prompt && prompt.Id == request.PromptId)
+            choice = prompt.SelectedChoice; // Free-text answers may have no selected button.
+        else if (choice == null)
             return Error("Wait for a live answer or make a fresh plan.", "coordination_answer_unavailable");
-        if (request.CombatTargetId is uint id && prompt.SelectedChoice?.CombatTargetId is uint chosen && id != chosen)
+        if (request.CombatTargetId is uint id && choice?.CombatTargetId is uint chosen && id != chosen)
             return Error("This action targets a different enemy from the agreed choice.", "coordination_target_mismatch");
         return new { status = "ok" };
     }
 
     private static object SendText(MessageInput input)
     {
-        if (!TryRecipient(input.RecipientSlot, out ulong recipient))
+        if (!IsText(input.Text?.Trim(), 200))
+            return Error("Enter a message of up to 200 characters.");
+        if (input.AllPlayers)
+        {
+            if (input.RecipientSlot != null)
+                return Error("Choose a recipient slot or send to everyone.");
+            var recipients = BroadcastText(input.Text);
+            return recipients.Length > 0
+                ? new { status = "ok", recipient_slots = recipients.Select(FindSlot).ToArray() }
+                : Error("No connected teammates to message.", "recipient_unavailable");
+        }
+        if (input.RecipientSlot is not int slot || !TryRecipient(slot, out ulong recipient))
             return Error("Choose a connected teammate by player slot.", "recipient_unavailable");
         return TrySendText(recipient, input.Text)
             ? new { status = "ok" }
@@ -500,14 +575,31 @@ public static class CoordinationMod
         return true;
     }
 
+    private static ulong[] BroadcastText(string? text)
+    {
+        string? message = text?.Trim();
+        if (_network == null || !IsText(message, 200))
+            return [];
+        ulong origin = _network.NetId;
+        var recipients = _chatRecipientIds.Where(id =>
+            Transmit(new("message", id, origin, Text: message, Broadcast: true))).ToArray();
+        if (recipients.Length > 0)
+            AddMessage(new("message", recipients[0], origin, Text: message, Broadcast: true), isLocal: true);
+        return recipients;
+    }
+
     private static void AddMessage(Envelope envelope, bool isLocal)
     {
-        var entry = new MessageEvent(++_nextEventId, FindSlot(envelope.From), FindSlot(envelope.To), envelope.Text!, isLocal);
+        var entry = new MessageEvent(++_nextEventId, FindSlot(envelope.From),
+            envelope.Broadcast ? null : FindSlot(envelope.To), envelope.Text!, isLocal, envelope.Broadcast);
         Messages.Enqueue(entry);
         if (Messages.Count > RetainedEvents)
             Messages.Dequeue();
-        _panel?.ShowMessage(isLocal ? (_localLanguage == GameNameLocalization.SimplifiedChinese ? "你" : "You") : GetName(envelope.From),
-            entry.Text);
+        bool zh = _localLanguage == GameNameLocalization.SimplifiedChinese;
+        string sender = isLocal ? (zh ? "你" : "You") : GetName(envelope.From);
+        if (envelope.Broadcast)
+            sender += zh ? " · 全队" : " · Party";
+        _panel?.ShowMessage(sender, entry.Text);
     }
 
     private static string GetName(ulong id)
@@ -520,9 +612,11 @@ public static class CoordinationMod
     {
         status = "ok",
         outgoing_prompt = _outgoing == null ? null : Describe(_outgoing),
+        outgoing_poll = _outgoingPoll == null ? null : DescribePoll(_outgoingPoll),
         incoming_prompt = _incoming == null ? null : Describe(_incoming),
         events = Messages.Where(message => message.Id > afterId).ToArray(),
         local_language = _localLanguage,
+        party_language = _partyLanguage,
         teammates = _chatRecipientIds.Select(id => new
         {
             player_slot = FindSlot(id),
@@ -535,6 +629,8 @@ public static class CoordinationMod
     private static object Describe(Prompt prompt) => new
     {
         prompt_id = prompt.Id,
+        poll_id = prompt.Envelope.PollId,
+        host_tiebreak = prompt.Envelope.HostTiebreak,
         status = prompt.Status,
         sender_slot = FindSlot(prompt.Envelope.From),
         recipient_slot = FindSlot(prompt.Envelope.To),

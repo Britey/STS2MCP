@@ -25,6 +25,7 @@ The singleplayer and multiplayer endpoints return HTTP 409 when the run mode doe
 | Parameter | Values             | Default | Description     |
 |-----------|--------------------|---------|-----------------|
 | `format`  | `json`, `markdown` | `json`  | Response format |
+| `language` | `game`, `en` (`eng`), `zh-CN` (`zhs`) | MCP Language setting | Choose the locale for enemy, pet, and status names in combat. `game` follows the local game language. Action IDs stay the same. |
 
 ### Common Top-Level Fields
 
@@ -1504,6 +1505,7 @@ Finish the Crystal Sphere minigame.
       "is_alive": true,
       "is_local": false,
       "is_ready_to_end_turn": false,
+      "status": [ /* Power Objects for this teammate */ ],
       "pets": [                       // Omitted for local player (pets are under top-level "player")
         {
           "id": "OSTY",

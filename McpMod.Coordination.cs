@@ -3,25 +3,34 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Localization;
 
 namespace STS2_MCP;
 
 public static partial class McpMod
 {
     private static Func<string, string, string>? _dispatchCoordination;
+    private static readonly Lazy<Func<string?>?> PartyNameLanguageReader = new(() =>
+        FindCoordinationMod()?.GetMethod("GetPartyNameLanguage")?.CreateDelegate<Func<string?>>());
 
-    private static Func<string, string, string>? FindCoordinationBridge()
-    {
-        var assembly = AppDomain.CurrentDomain.GetAssemblies()
-            .FirstOrDefault(candidate => candidate.GetName().Name == "STS2_Coordination");
-        return assembly?.GetType("Sts2Coordination.CoordinationMod")
-            ?.GetMethod("Dispatch", new[] { typeof(string), typeof(string) })
-            ?.CreateDelegate<Func<string, string, string>>();
-    }
+    private static Type? FindCoordinationMod() =>
+        AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(candidate => candidate.GetName().Name == "STS2_Coordination")
+            ?.GetType("Sts2Coordination.CoordinationMod");
+
+    private static string? GetPartyNameLanguage() => PartyNameLanguageReader.Value?.Invoke();
 
     private static Dictionary<string, object?> ExecuteCoordination(string action, Dictionary<string, JsonElement> data)
     {
-        if (action != "coordination_prompt")
+        if (action is not ("coordination_prompt" or "coordination_poll"))
+        {
+            var result = CallCoordination(action, data);
+            if (action == "coordination_state" && result.ContainsKey("local_language"))
+                result["preferred_language"] = GetPartyNameLanguage() ?? _configuredNameLanguage ?? LocManager.Instance.Language;
+            return result;
+        }
+        if (action == "coordination_poll" &&
+            data.TryGetValue("rule", out var rule) && rule.ValueKind == JsonValueKind.String && rule.GetString() == "any_yes")
             return CallCoordination(action, data);
         if (!data.TryGetValue("options", out var input) || input.ValueKind != JsonValueKind.Array ||
             input.GetArrayLength() is < 2 or > 4)
@@ -73,7 +82,8 @@ public static partial class McpMod
 
     private static Dictionary<string, object?> CallCoordination(string action, object data)
     {
-        _dispatchCoordination ??= FindCoordinationBridge();
+        _dispatchCoordination ??= FindCoordinationMod()?.GetMethod("Dispatch", [typeof(string), typeof(string)])
+            ?.CreateDelegate<Func<string, string, string>>();
         if (_dispatchCoordination == null)
             return BlockedAction(new("coordination_mod_unavailable", "Enable the STS2 Co-op Coordination companion on each seat.", false));
         string json = _dispatchCoordination(action, JsonSerializer.Serialize(data, _compactJsonOptions));

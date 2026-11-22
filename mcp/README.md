@@ -1,10 +1,60 @@
-# MCP Tools
+# MCP setup and agent guide
+
+The MCP release pairs an in-game bridge with a local stdio server. The bridge exposes game state and actions to the server, which presents them as MCP tools. The release was tested on Windows with Slay the Spire 2 **v0.113.1**.
+
+## Install and connect
+
+1. Quit the game. Download **STS2_MCP-0.5.0.zip** and **STS2_MCP-client-0.5.0.zip** from the same **MCP** release. [Britey's GitHub releases](https://github.com/Britey/STS2MCP/releases)
+2. In Steam, right-click the game and select **Manage → Browse local files**. Extract `STS2_MCP-0.5.0.zip` and place its `STS2_MCP` folder inside the game's `mods` folder. Create `mods` if needed. Keep `STS2_MCP.dll` and `STS2_MCP.json` together as `mods/STS2_MCP/STS2_MCP.dll` and `mods/STS2_MCP/STS2_MCP.json`. On macOS, the mods directory is inside `SlayTheSpire2.app/Contents/MacOS/mods/`.
+3. Launch the game and accept the mod loading prompt if it appears. Check that **STS2 MCP** appears in the in-game Mods screen.
+4. Extract the client ZIP to a permanent folder such as `C:/Tools/STS2MCP`, with `mcp/server.py`, `mcp/pyproject.toml`, and `mcp/uv.lock` inside. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and use Python 3.11 or newer. This checks the launch command and installs the locked dependencies:
+
+   ```powershell
+   uv run --directory "C:/Tools/STS2MCP/mcp" --locked python server.py --help
+   ```
+
+5. Register `sts2` as a local stdio MCP server in your AI client. For clients that use an `mcpServers` JSON config, use:
+
+   ```json
+   {
+     "mcpServers": {
+       "sts2": {
+         "command": "uv",
+         "args": ["run", "--directory", "C:/Tools/STS2MCP/mcp", "--locked", "python", "server.py"]
+       }
+     }
+   }
+   ```
+
+   Replace the example directory with the absolute path to your extracted `mcp` folder. If the AI client cannot find `uv`, use its absolute executable path as `command`.
+6. Reconnect the AI client and ask it to call `get_game_state(format="json")` from the game's main menu. Expect a result with `state_type: "menu"`. If you're already in co-op, use `mp_get_game_state(format="json")`. For co-op chat and polls, install the [Co-op Chat companion](../docs/chat-install.md) on each seat.
+
+### Connection checks
+
+- The game mod listens on `localhost:15526` by default. Visiting `http://localhost:15526/` should show `status: "ok"` and the bridge version. If the connection is refused, verify that the game is running, the mod is enabled, and the manifest is named `STS2_MCP.json`.
+- The token file is created on first launch with the mod enabled. Its default Windows path is `%APPDATA%\SlayTheSpire2\STS2_MCP.token`. If the agent cannot read it, use the path from the game log and append `"--token-file", "absolute/path/to/STS2_MCP.token"` to the client arguments. Keep the token file private.
+- If you set a custom `port` in `STS2_MCP.conf`, restart the game and append `"--port", "<port>"` to the args. The optional `--host` flag accepts `localhost` or `127.0.0.1`.
+- HTTP 401 means the bridge rejected the token. Confirm the client uses the token for the running game. HTTP 409 means the run mode and tool family differ. Use `mp_*` state and action tools during co-op and ordinary gameplay tools for solo play or menus.
+
+## Agent playbook
+
+1. **Read before acting.** Start with JSON. Use `get_game_state(format="json", compact=true, wait_for_ready=true)` for solo combat or `mp_get_game_state(format="json")` for co-op. Choose tools according to `state_type` and the options actually shown. Use `menu_select` for advertised menu options before the run begins.
+2. **Check readiness and targets.** In a fight, read `battle.can_act`, `battle.warnings`, the enemy intents, and all active statuses before planning. Use the current `card_index` and target `entity_id`, even when the display name is translated. Use `target_player_slot` for a co-op card or potion aimed at a player. Refresh state after a hand change before reusing an index.
+3. **Resolve the outcome.** In solo combat, use `return_state=true` for individual plays, or `combat_play_sequence` for a short plan based on the starting hand. Read the submitted prefix and resulting state. If the game is animating, an action is pending, or a receipt times out, refresh state before retrying a mutation. If a selection opens, resolve it with the relevant selection tool.
+4. **Coordinate co-op moves.** Check incoming prompts and messages before committing a move that affects teammates. If you're waiting for consent, keep the move on hold until the prompt or poll is resolved. Use `run.map_coord` to verify the actual map destination after voting and `battle.can_undo_end_turn` to tell whether your end-turn vote can be reversed. [Combat coordination](#combat-coordination)
+5. **Report blockers.** If a screen needs manual input or you cannot confirm that an action took effect, report the screen and action receipt. Proceed to the next decision only after you can verify the state.
+
+Example instruction to give your agent:
+
+> Play this run through the STS2 MCP tools. Read the current state and wait for readiness before acting. Check warnings and coordinate with the party before dependent plays. Stop at a screen you cannot handle and report the last confirmed action.
+
+[Gameplay strategy and more tool tips](../AGENTS.md) · [Raw HTTP API](../docs/raw-full.md)
 
 ## Singleplayer
 
 | Tool | Scope | Description |
 |---|---|---|
-| `get_game_state(format?, compact?, wait_for_ready?)` | General | Get current game state with optional transition waiting and compact output |
+| `get_game_state(format?, compact?, wait_for_ready?, language?)` | General | Get current game state with optional transition waiting, compact output, and combat-name locale |
 | `menu_select(option, seed?)` | General | Select a visible menu/game-over option |
 | `get_profile()` | Profiles | Get active profile progress |
 | `get_compendium()` | Profiles | Get active profile progress grouped like the in-game Compendium |
@@ -77,7 +127,7 @@ All multiplayer tools are prefixed with `mp_`. They route through `/api/v1/multi
 
 | Tool | Scope | Description |
 |---|---|---|
-| `mp_get_game_state(format?)` | General | Get multiplayer game state (all players, votes, bids) |
+| `mp_get_game_state(format?, language?)` | General | Get multiplayer game state (players, votes, bids) with optional combat-name locale |
 | `mp_combat_play_card(card_index, target?, coordination_prompt_id?, target_player_slot?)` | Combat | Play a card. Use a party `player_slot` for player-targeted cards. |
 | `mp_combat_end_turn(allow_playable_cards?, coordination_prompt_id?)` | Combat | Submit an end-turn vote. Set `allow_playable_cards=true` only to deliberately leave playable cards in hand. |
 | `mp_combat_undo_end_turn()` | Combat | Retract an end-turn vote while `battle.can_undo_end_turn` is true |
@@ -110,28 +160,31 @@ All multiplayer tools are prefixed with `mp_`. They route through `/api/v1/multi
 
 ### Combat Coordination
 
-Install the same version of the in-game coordination companion on every co-op client. Human seats use the companion alone. AI seats also use the STS2MCP bridge and its MCP server. The companion adds quick replies and plain text.
-
-From the repository root, build the companion against your game installation:
-
-```powershell
-dotnet build coordination/STS2_Coordination.csproj -c Release -o out/STS2_Coordination '-p:STS2GameDir=C:/path/to/Slay the Spire 2'
-```
-
-Copy `STS2_Coordination.dll` and `STS2_Coordination.json` to `<game>/mods/STS2_Coordination/` and enable the companion in the game. Build and install the updated STS2MCP bridge on AI seats as usual.
-
-During a co-op run, click **Chat** (**聊天** in Simplified Chinese) in the upper right to start a conversation. Choose a teammate if more than one is connected, then type a message and press **Send** or **Enter**. The panel follows each player's in-game language setting.
+Install the same version of the Co-op Chat companion on every seat. Each AI seat also needs the MCP bridge and client. A human host needs the MCP bridge to set the party's MCP language. [Player install guide](../docs/chat-install.md)
 
 | Tool | Description |
 |---|---|
 | `mp_coordination_prompt(recipient_slot, options, question?, allow_text?, lifetime_seconds?)` | Ask one teammate a combat question. Use their zero-based slot in the multiplayer state's `players` array. |
-| `mp_coordination_state(after_id?)` | Read prompts, recent events, and teammate languages by player slot. Use the returned `latest_id` as the next `after_id` within this run. |
+| `mp_coordination_poll(options?, question?, lifetime_seconds?, rule?)` | Ask every connected teammate to vote on the same combat question. |
+| `mp_coordination_state(after_id?)` | Read prompts, the outgoing poll, recent chat, and teammate languages by player slot. Use `latest_id` as the next `after_id` within the run. |
 | `mp_coordination_reply(prompt_id, choice_index?, text?, go_ahead?)` | Submit one reply using a zero-based choice index, plain text, or `go_ahead=true`. |
-| `mp_coordination_message(recipient_slot, text)` | Send a direct text message without creating a prompt. |
-| `mp_coordination_cancel(prompt_id)` | Withdraw your outgoing prompt. |
+| `mp_coordination_message(text, recipient_slot?, all_players?)` | Send chat to one slot or set `all_players=true` to message everyone. |
+| `mp_coordination_cancel(prompt_id)` | Withdraw your outgoing prompt or poll by its ID. |
 
-Each seat can have one active outgoing prompt. Give it two to four options such as `{"kind":"agent_first"}`, `{"kind":"focus_enemy","target":"NIBBIT_0"}`, or `{"kind":"no_preference"}`. The `teammate_first` choice waits for the teammate to finish a card play or choose **Go ahead**. A custom `choice` needs a label. Open prompts expire after 25 seconds by default. The allowed lifetime is 5–60 seconds. An accepted answer stays valid until its combat context changes. Text replies and direct messages can contain up to 200 characters.
+Each seat can have one active outgoing prompt or poll. Give it two to four options such as `{"kind":"agent_first"}`, `{"kind":"focus_enemy","target":"NIBBIT_0"}`, or `{"kind":"no_preference"}`. The `teammate_first` choice in a direct prompt waits for that teammate to finish a card play or choose **Go ahead**. For group turn order, use custom choices with named players. A custom `choice` needs a label. Each ballot round defaults to 25 seconds and accepts 5–60 seconds. An accepted answer stays valid until its combat context changes. Chat is available through the **Everyone** recipient in parties with multiple teammates.
 
-Omit the question and built-in labels to generate them in English or Simplified Chinese using the recipient's locale. For a teammate whose `language` is `zhs`, write custom text in Simplified Chinese and look up game terms in batches with `get_simplified_chinese_names`. Pass entries such as `{"kind":"card","id":"BASH"}` and `{"kind":"enemy","id":"NIBBIT_0"}`. Names come from the installed game's language files. Keep the original IDs for tool actions. The tool works on a client set to English.
+With `rule="most_votes"`, everyone gets one vote and the highest tally wins when all respond or the voting window ends. A tie gives only the host a fresh ballot containing the tied options. If the host started the poll, their tie ballot appears on the same seat. Zero votes, a missing host decision, or a change in combat context expires the poll.
 
-Hold the affected combat action while the prompt is `pending` or `waiting_for_teammate`. Poll the coordination state with a brief delay between calls. An `answered` prompt gives you the reply. Refresh the game state, then pass its `prompt_id` as `coordination_prompt_id` when submitting the agreed card, potion, or end-turn action. On `expired` or `cancelled`, reconsider the move from fresh game state. Replies themselves perform no game actions.
+Use `rule="any_yes"` for questions such as “Can anyone apply Vulnerable this turn?” Supply a question and omit options to get Yes and No buttons. One Yes settles the poll immediately, and `outgoing_poll.votes` identifies its player slot. Every teammate must vote No to settle the poll as No. Silence leaves the result unknown when the ballot expires.
+
+Use `outgoing_poll.winning_choice_index` when its status is `answered`, and pass its `poll_id` as `coordination_prompt_id` to bind the gameplay action.
+
+Omit the question and built-in labels when the default wording fits. The host's shared language takes precedence when configured. Use `party_language` for custom text when present. Otherwise, use the recipient's `language` for a direct message or `preferred_language` for party-wide text. If the language is `zhs`, use official terms from `mp_get_game_state(language="zh-CN")` or look them up with `get_simplified_chinese_names`. Pass entries such as `{"kind":"card","id":"BASH"}` and `{"kind":"enemy","id":"NIBBIT_0"}`. Keep the original IDs for tool actions.
+
+Set **Settings → General → MCP Language** to **Follow Game**, **English**, or **简体中文**. The MCP bridge saves the choice as `"language": "game"`, `"language": "en"`, or `"language": "zh-CN"` in `STS2_MCP.conf` beside its DLL. Settings changes take effect immediately. Restart the game after editing the file by hand.
+
+With the co-op companion installed, the host's **English** or **简体中文** selection applies to every connected seat's MCP combat names, built-in prompt text, and suggested language for AI chat. The selected locale is available as `party_language` and `preferred_language` in `mp_coordination_state()`. **Follow Game** clears the host's shared preference, so individual MCP and game language settings take effect again.
+
+Use `mp_get_game_state(language="zh-CN")` or `get_game_state(language="zh-CN")` to request official Simplified Chinese names for enemies, pets, buffs, and debuffs in JSON or Markdown for a single read. In co-op combat, check `player.status` for your own effects and `players[].status` for teammates' effects. For a custom team poll about applying 易伤, pass `rule="any_yes"` and `question="这回合有人能施加易伤吗？"`. Custom questions and chat are sent as written. With **Follow Game**, built-in button labels follow each recipient's game language.
+
+Hold the affected combat action while a direct prompt is `pending` or `waiting_for_teammate`, or a group poll is `pending` or `waiting_for_host`. Poll the coordination state with a brief delay between reads. When the answer arrives, refresh the game state and pass the direct prompt's `prompt_id` or group poll's `poll_id` as `coordination_prompt_id` on the agreed card, potion, or end-turn action. On `expired` or `cancelled`, reconsider the move from fresh game state.

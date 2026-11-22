@@ -29,7 +29,7 @@ public static partial class McpMod
         if (player == null)
             return Error("Could not find local player");
 
-        if (action is "coordination_state" or "coordination_prompt" or "coordination_reply" or
+        if (action is "coordination_state" or "coordination_prompt" or "coordination_poll" or "coordination_reply" or
             "coordination_message" or "coordination_cancel")
             return ExecuteCoordination(action, data);
 

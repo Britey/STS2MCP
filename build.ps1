@@ -75,6 +75,6 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ""
 Write-Host "=== Build succeeded ===" -ForegroundColor Green
-Write-Host "To install, copy these files to <game_install>/mods/:"
+Write-Host "To install, put both files in <game_install>/mods/STS2_MCP/:"
 Write-Host "  $outDir\STS2_MCP.dll"
-Write-Host "  $scriptDir\mod_manifest.json  ->  mods\STS2_MCP.json"
+Write-Host "  $scriptDir\mod_manifest.json  ->  mods\STS2_MCP\STS2_MCP.json"
