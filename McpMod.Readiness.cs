@@ -15,7 +15,7 @@ namespace STS2_MCP;
 
 public static partial class McpMod
 {
-    private sealed record ActionBlock(string Reason, string Message, bool Retryable);
+    private sealed record ActionBlock(string Reason, string Message, bool Retryable, List<StateChange>? Changes = null);
 
     private static ActionBlock? GetCombatActionBlock(Player? player)
     {
@@ -34,16 +34,19 @@ public static partial class McpMod
         if (playerState.Phase != PlayerTurnPhase.Play ||
             (manager.PlayersTakingExtraTurn.Count > 0 && !manager.PlayersTakingExtraTurn.Contains(player)))
             return new("turn_transition", "Wait for the local player's play phase.", true);
+        if (VoteInFlight(player))
+            return new("end_turn_pending", "End-turn vote sent; awaiting the host.", false);
         if (manager.IsPlayerReadyToEndTurn(player))
             return new("turn_already_ended", "The local player has already ended the turn.", false);
         if (manager.PlayerActionsDisabled)
             return new("player_actions_disabled", "The game is temporarily blocking combat actions.", true);
 
         // Native turn setup can finish for this player before the shared executor is unpaused.
-        var executor = RunManager.Instance.ActionExecutor;
+        var run = RunManager.Instance;
+        var executor = run.ActionExecutor;
         if (executor.IsPaused)
             return new("turn_transition", "Wait for the combat action queue to resume.", true);
-        if (executor.IsRunning)
+        if (executor.IsRunning || IsMultiplayerRun() && !run.ActionQueueSet.IsEmpty)
             return new("action_resolving", "Wait for the current combat actions to resolve.", true);
         if (hand == null || !IsLiveNode(hand))
             return new("hand_not_ready", "The combat hand is still loading.", true);

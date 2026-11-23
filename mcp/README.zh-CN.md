@@ -40,7 +40,7 @@ STS2 MCP 由游戏内桥接模组和本地 stdio MCP 服务组成。桥接模组
 
 ## 智能体操作流程
 
-1. **先读取状态。** 优先使用 JSON。单人战斗调用 `get_game_state(format="json", compact=true, wait_for_ready=true)`，联机调用 `mp_get_game_state(format="json")`。根据 `state_type` 和当前可用选项选择工具。在主菜单用 `menu_select` 选择已列出的操作。
+1. **先读取状态。** 优先使用 JSON。单人调用 `get_game_state(format="json", compact=true, wait_for_ready=true, auto_advance_map=true)`，联机调用 `mp_get_game_state(view="decision", coordination_after_id=0, auto_advance_map=true)`。只有一条可走路线时会自动前进或投票，岔路仍由玩家选择。只想观察时省略 `auto_advance_map`。进入战斗时，将首次可见的手牌和队伍消息直接交给模型。如果需要配合出牌顺序，立即告知队友。等 `battle.can_act` 为真后再出牌。将 `coordination.latest_id` 传给下一次读取或操作。批量出牌可传 `view="decision"`，单张出牌和使用药水可传 `return_state=true`。根据 `state_type` 和当前可用选项选择工具。在主菜单用 `menu_select` 选择已列出的操作。
 2. **确认行动条件和目标。** 先看 `battle.can_act`、`battle.warnings`、敌人意图和生效状态，再计划出牌。`battle.can_act` 为 false 时查看 `battle.action_blocked_reason`。用最新的 `card_index`，瞄准敌人时用 `entity_id`，指定联机玩家时用 `target_player_slot`。手牌变化后重新读取索引。
 3. **确认操作结果。** 单人出牌或结束回合时可传 `return_state=true`，在回执里获取下一份紧凑状态。战斗动画未结束、操作仍在处理或回执超时时，先刷新状态再决定要不要重试。出现选牌或确认界面时，使用对应工具完成选择。
 4. **联机先配合。** 执行依赖队友的操作前，检查收到的提问和消息。需要队友确认时，等回复或投票结束再行动。地图投票后用 `run.map_coord` 确认实际到达位置。查看 `battle.can_undo_end_turn`，判断能否撤销结束回合的投票。[战斗配合](#战斗配合)
@@ -57,7 +57,7 @@ STS2 MCP 由游戏内桥接模组和本地 stdio MCP 服务组成。桥接模组
 | 单人战斗 | `combat_play_card`、`combat_end_turn`。批量出牌用 `combat_play_sequence`，最多 6 张。提供起始手牌里的 `card_index`、`card_id` 和必要的目标。部分完成时读 `submitted` 和 `stop_reason`。 |
 | 路线与房间 | `map_choose_node` 选路线，`event_choose_option` 选事件选项，`rest_choose_option` 操作休息处，`shop_purchase` 按当前 `item_index` 购买。商店开着时，`proceed_to_map(leave_shop=true)` 可一次离店。 |
 | 奖励与预览 | 用 `rewards_claim` 领取奖励，`rewards_pick_card` 选牌或 `rewards_skip_card` 跳过。用 `bundle_select` 打开预览，再调用 `bundle_confirm_selection` 或 `bundle_cancel_selection`。 |
-| 联机战斗 | `mp_combat_play_card`、`mp_combat_end_turn`、`mp_combat_undo_end_turn`。确实要留下可打的牌时，结束回合才传 `allow_playable_cards=true`。 |
+| 联机战斗 | `mp_combat_decision()` 一次读取手牌、合法目标和队伍消息；`mp_combat_play_sequence` 批量出牌，`mp_combat_play_card` 单张出牌，`mp_combat_end_turn` 结束回合，`mp_combat_undo_end_turn` 撤销。确实要留下可打的牌时，单独结束回合才传 `allow_playable_cards=true`。 |
 | 联机路线与行动 | `mp_map_vote` 投票，`mp_rest_choose_option` 操作休息处，`mp_treasure_claim_relic` 参与遗物竞选。用 `target_player_slots` 确认可以成为目标的队友。 |
 | 档案与游戏知识 | `get_profile` 读档案摘要，`get_compendium` 查图鉴和近期记录，`search_wiki` 查已发现的卡牌、遗物或已解锁角色。 |
 
@@ -67,11 +67,15 @@ STS2 MCP 由游戏内桥接模组和本地 stdio MCP 服务组成。桥接模组
 
 ## 战斗配合
 
+进入真人联机冒险后，用 `mp_coordination_message` 在游戏内打个招呼。收到队友的消息就回复。需要协商出牌顺序、目标或路线时，用聊天或投票确认。平时通过游戏状态读取聊天更新，只有专门等回复时才单独查询。
+
+批量出牌时，从同一份状态读取 `battle.sequence_turn_id`、手牌索引和卡牌 ID。队友行动、新消息、手牌或敌人变化、警告和待选操作都会让批次停下。检查 `submitted` 和返回的 `state` 后重新计划，已经提交的牌无需重发。需要指定队友或绑定提问结果时，单张出牌。
+
 | 工具 | 用法 |
 | --- | --- |
 | `mp_coordination_prompt` | 向一位队友提问，`recipient_slot` 使用 `players` 中从 0 开始的槽位。 |
 | `mp_coordination_poll` | 同时向所有已连接的队友发起同一个投票。 |
-| `mp_coordination_state` | 查看提问、`outgoing_poll`、聊天消息和队友语言。用 `latest_id` 作为本局下一次读取的 `after_id`。 |
+| `mp_coordination_state` | 专门等待聊天或投票结果时使用。平时从游戏状态中的 `coordination` 读取聊天、提问、投票和队友语言。 |
 | `mp_coordination_reply` | 按 `prompt_id` 回复。从 0 开始的 `choice_index`、允许时的 `text`、或 `go_ahead=true` 三选一。 |
 | `mp_coordination_message` | 用 `recipient_slot` 私聊，或用 `all_players=true` 发给全队。 |
 | `mp_coordination_cancel` | 按 ID 撤回自己发起的提问或投票。 |

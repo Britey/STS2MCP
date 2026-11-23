@@ -22,9 +22,10 @@ public static partial class McpMod
     private sealed record PlannedPlay(int? CardIndex, string? CardId, string? Target);
     private sealed record SequencePlay(CardModel Card, string CardId, string? Target);
     private sealed record SequencePlan(Player Player, ICombatState Combat, int Turn, HashSet<Creature> Enemies,
-        List<SequencePlay> Plays);
+        List<SequencePlay> Plays, MultiplayerSequence? Multiplayer);
 
-    private static async Task<Dictionary<string, object?>> ExecuteCardSequence(Dictionary<string, JsonElement> data)
+    private static async Task<Dictionary<string, object?>> ExecuteCardSequence(Dictionary<string, JsonElement> data,
+        bool multiplayer = false)
     {
         if (!data.TryGetValue("plays", out var entries) || entries.ValueKind != JsonValueKind.Array ||
             entries.GetArrayLength() is < 1 or > MaxSequencePlays)
@@ -40,14 +41,45 @@ public static partial class McpMod
             endTurnValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
             return Error("end_turn must be a boolean.");
         bool endTurn = endTurnValue.ValueKind == JsonValueKind.True;
+        int? coordinationAfterId = null;
+        string? turnId = null;
+        TargetHpRange? hpRange = null;
+        if (data.TryGetValue("target_hp_range", out var range))
+        {
+            try { hpRange = range.Deserialize<TargetHpRange>(_jsonOptions); }
+            catch (JsonException) { return Error("Invalid target_hp_range."); }
+            if (!multiplayer || hpRange == null || string.IsNullOrEmpty(hpRange.Target) ||
+                hpRange.Min < 1 || hpRange.Max < hpRange.Min ||
+                !plays.Any(p => p?.Target == hpRange.Target))
+                return Error("Provide a planned target and a positive, inclusive HP range.");
+        }
+        if (multiplayer)
+        {
+            if (!data.TryGetValue("turn_id", out var turn) || turn.ValueKind != JsonValueKind.String ||
+                string.IsNullOrEmpty(turnId = turn.GetString()))
+                return Error("Provide turn_id from battle.sequence_turn_id in fresh multiplayer state.");
+            if (data.TryGetValue("coordination_after_id", out var cursor))
+            {
+                if (cursor.ValueKind != JsonValueKind.Number || !cursor.TryGetInt32(out int parsed) || parsed < 0)
+                    return Error("coordination_after_id must be a non-negative integer.");
+                coordinationAfterId = parsed;
+            }
+            if (data.ContainsKey("coordination_prompt_id") || entries.EnumerateArray().Any(entry =>
+                    entry.TryGetProperty("coordination_prompt_id", out _) || entry.TryGetProperty("target_player_slot", out _)))
+                return Error("Use individual card plays for player targets or coordination-bound actions.");
+        }
 
+        bool decision = multiplayer && data.TryGetValue("view", out var view) &&
+            view.ValueKind == JsonValueKind.String && view.GetString() == "decision";
         var submitted = new List<string>(plays.Length);
         var clock = Stopwatch.StartNew();
         ActionBlock? stop;
+        MultiplayerSequence? mp = null;
         try
         {
-            var bound = await RunOnMainThread(() => BindSequence(plays)).ConfigureAwait(false);
+            var bound = await RunOnMainThread(() => BindSequence(plays, turnId, coordinationAfterId, hpRange)).ConfigureAwait(false);
             var plan = bound.Plan;
+            mp = plan?.Multiplayer;
             stop = bound.Block;
             if (plan != null)
             {
@@ -73,10 +105,12 @@ public static partial class McpMod
                 if (stop == null && endTurn)
                 {
                     var wait = new CombatStateWait();
-                    stop = await RunOnMainThread(() => GetSequenceBlock(plan.Player, plan) ??
-                        GetSequenceRejection(ExecuteEndTurn(plan.Player, wait), "end_turn_rejected")).ConfigureAwait(false);
+                    stop = await RunOnMainThread(() => GetSequenceBlock(plan.Player, plan, multiplayer) ??
+                        GetSequenceRejection(multiplayer ? ExecuteMultiplayerEndTurn(plan.Player, data) :
+                            ExecuteEndTurn(plan.Player, wait), "end_turn_rejected")).ConfigureAwait(false);
                     if (stop == null)
-                        return await BuildSequenceResult(submitted, true, null, wait).ConfigureAwait(false);
+                        return await BuildSequenceResult(submitted, true, null, multiplayer ? null : wait,
+                            multiplayer, coordinationAfterId, decision).ConfigureAwait(false);
                 }
             }
         }
@@ -85,19 +119,32 @@ public static partial class McpMod
             GD.PrintErr($"[STS2 MCP] Card sequence interrupted: {ex}");
             stop = new("sequence_interrupted", "The next result is uncertain. Refresh state before continuing.", false);
         }
+        finally
+        {
+            if (mp != null)
+                await RunOnMainThread(() => { mp.Dispose(); return true; }).ConfigureAwait(false);
+        }
 
-        return await BuildSequenceResult(submitted, false, stop).ConfigureAwait(false);
+        return await BuildSequenceResult(submitted, false, stop, multiplayer: multiplayer,
+            coordinationAfterId: coordinationAfterId, decision: decision).ConfigureAwait(false);
     }
 
-    private static (SequencePlan? Plan, ActionBlock? Block) BindSequence(PlannedPlay?[] plays)
+    private static (SequencePlan? Plan, ActionBlock? Block) BindSequence(PlannedPlay?[] plays,
+        string? turnId, int? coordinationAfterId, TargetHpRange? hpRange)
     {
+        bool multiplayer = turnId != null;
         var run = RunManager.Instance.DebugOnlyGetState();
         var player = run == null ? null : LocalContext.GetMe(run);
-        if (GetSequenceBlock(player) is { } block)
+        if (GetSequenceBlock(player, multiplayer: multiplayer) is { } block)
             return (null, block);
         if (player?.PlayerCombatState is not { } playerState || player.Creature.CombatState is not { } combat)
             return (null, new("not_in_combat", "No active player combat state.", false));
+        if (turnId != null && CheckSequenceObservation(turnId, combat, player, hpRange) is { } stale)
+            return (null, stale);
 
+        if (hpRange != null && (ResolveTarget(combat, hpRange.Target) is not { } target ||
+            target.CurrentHp < hpRange.Min || target.CurrentHp > hpRange.Max))
+            return (null, new("target_hp_out_of_range", "The planned target is outside the accepted HP range.", false));
         var hand = playerState.Hand.Cards;
         var bound = new List<SequencePlay>(plays.Length);
         var usedIndices = new HashSet<int>();
@@ -110,21 +157,33 @@ public static partial class McpMod
                 return (null, new("card_mismatch", "Each play must match a distinct card in the starting hand.", false));
 
             var card = hand[index];
+            if (multiplayer && card.TargetType is TargetType.AnyAlly or TargetType.AnyPlayer)
+                return (null, new("player_target_required", "Play cards that target a player individually.", false));
             if (card.TargetType == TargetType.AnyEnemy &&
                 (play.Target == null || ResolveTarget(combat, play.Target) == null))
                 return (null, new("target_mismatch", "A planned target is missing or is no longer alive.", false));
             bound.Add(new SequencePlay(card, card.Id.Entry, play.Target));
         }
 
+        MultiplayerSequence? mp = null;
+        if (multiplayer)
+        {
+            var chat = ReadCoordinationDelta(coordinationAfterId ?? int.MaxValue);
+            int? latest = GetCoordinationCursor(chat);
+            if (HasOpenCoordination(chat) ||
+                coordinationAfterId is int cursor && latest is int current && current != cursor)
+                return (null, CoordinationChanged);
+            mp = new MultiplayerSequence(player, combat, hand, latest);
+        }
         return (new(player, combat, playerState.TurnNumber,
             new HashSet<Creature>(GetLivingEnemies(combat).Select(entry => entry.Creature), ReferenceEqualityComparer.Instance),
-            bound), null);
+            bound, mp), null);
     }
 
-    private static ActionBlock? GetSequenceBlock(Player? player, SequencePlan? plan = null)
+    private static ActionBlock? GetSequenceBlock(Player? player, SequencePlan? plan = null, bool multiplayer = false)
     {
-        if (IsMultiplayerRun())
-            return new("multiplayer", "Card sequences are for single-player combat.", false);
+        if (IsMultiplayerRun() != multiplayer)
+            return new("game_mode_changed", "The expected run mode is no longer active.", false);
         if (IsMapScreenOpenOrVisible() || NOverlayStack.Instance?.Peek() != null || GetOpenModalNode() != null ||
             Engine.GetMainLoop() is SceneTree tree && IsAnyFtueVisible(tree.Root))
             return new("screen_changed", "A different screen is active.", false);
@@ -137,19 +196,22 @@ public static partial class McpMod
             return new("combat_warning", "A new danger warning needs attention.", false);
         if (plan != null && !plan.Enemies.SetEquals(GetLivingEnemies(plan.Combat).Select(entry => entry.Creature)))
             return new("enemies_changed", "The enemies changed. Check the new state before continuing.", false);
+        if (plan?.Multiplayer is { } mp)
+            return mp.Check(plan);
         return null;
     }
 
     private static ActionBlock? SubmitSequenceCard(SequencePlan plan, SequencePlay play, CombatStateWait wait)
     {
-        if (GetSequenceBlock(plan.Player, plan) is { } block)
+        if (GetSequenceBlock(plan.Player, plan, plan.Multiplayer != null) is { } block)
             return block;
 
         var hand = plan.Player.PlayerCombatState!.Hand.Cards;
         for (int i = 0; i < hand.Count; i++)
         {
             if (ReferenceEquals(hand[i], play.Card) && hand[i].Id.Entry == play.CardId)
-                return GetSequenceRejection(ExecutePlayableCard(plan.Player, i, play.Target, wait), "card_rejected");
+                return GetSequenceRejection(ExecutePlayableCard(plan.Player, i, play.Target, wait,
+                    onSubmitting: plan.Multiplayer == null ? null : plan.Multiplayer.Expect), "card_rejected");
         }
 
         return new("card_missing", "The planned card is no longer in the hand.", false);
@@ -166,6 +228,8 @@ public static partial class McpMod
         {
             var (pending, stop) = await RunOnMainThread(() =>
             {
+                if (plan.Multiplayer is { } mp)
+                    return mp.CheckSettlement(plan);
                 if (IsWaitingForPlayableState(wait))
                     return (true, (ActionBlock?)null);
                 if (wait.CardCompletion is { IsFaulted: true } or { IsCanceled: true })
@@ -181,7 +245,7 @@ public static partial class McpMod
     }
 
     private static async Task<Dictionary<string, object?>> BuildSequenceResult(List<string> submitted, bool endTurn,
-        ActionBlock? stop, CombatStateWait? wait = null)
+        ActionBlock? stop, CombatStateWait? wait = null, bool multiplayer = false, int? coordinationAfterId = null, bool decision = false)
     {
         var result = new Dictionary<string, object?>
         {
@@ -190,10 +254,21 @@ public static partial class McpMod
             ["end_turn_submitted"] = endTurn,
             ["stop_reason"] = stop?.Reason,
             ["message"] = stop?.Message,
+            ["submitted_count"] = submitted.Count,
         };
+        if (stop?.Changes != null) result["changes"] = stop.Changes;
         try
         {
-            if (wait == null)
+            if (multiplayer)
+            {
+                var snapshot = await RunOnMainThread(() => BuildMultiplayerGameState(
+                    GetPartyNameLanguage() ?? _configuredNameLanguage, compact: true, coordinationAfterId, decision || stop != null))
+                    .ConfigureAwait(false);
+                result["state"] = snapshot;
+                if (stop != null)
+                    AddRecovery(result, snapshot);
+            }
+            else if (wait == null)
             {
                 result["state"] = await RunOnMainThread(() =>
                     BuildGameState(compact: true, nameLanguage: _configuredNameLanguage)).ConfigureAwait(false);

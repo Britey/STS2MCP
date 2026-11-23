@@ -16,7 +16,7 @@ namespace STS2_MCP;
 
 public static partial class McpMod
 {
-    private static async Task<Dictionary<string, object?>> ExecuteMultiplayerAction(string action, Dictionary<string, JsonElement> data)
+    private static async Task<Dictionary<string, object?>> ExecuteMultiplayerAction(string action, Dictionary<string, JsonElement> data, CombatStateWait? observation = null)
     {
         if (!RunManager.Instance.IsInProgress)
             return Error("No run in progress");
@@ -32,6 +32,9 @@ public static partial class McpMod
         if (action is "coordination_state" or "coordination_prompt" or "coordination_poll" or "coordination_reply" or
             "coordination_message" or "coordination_cancel")
             return ExecuteCoordination(action, data);
+
+        if (MultiplayerSequenceActive)
+            return BlockedAction(MultiplayerSequenceInProgress);
 
         var tree = Engine.GetMainLoop() as SceneTree;
         if (tree?.Root != null && IsAnyFtueVisible(tree.Root))
@@ -51,8 +54,8 @@ public static partial class McpMod
         return action switch
         {
             // Delegated to existing sync-safe handlers
-            "play_card" => ExecutePlayCard(player, data),
-            "use_potion" => ExecuteUsePotion(player, data),
+            "play_card" => ExecutePlayCard(player, data, observation),
+            "use_potion" => ExecuteUsePotion(player, data, observation),
             "discard_potion" => ExecuteDiscardPotion(player, data),
             "choose_map_node" => ExecuteChooseMapNode(data, mapVoter: player),
             "choose_event_option" => ExecuteChooseEventOption(data),
@@ -118,6 +121,7 @@ public static partial class McpMod
         int turnNumber = playerState.TurnNumber;
         RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
             new EndPlayerTurnAction(player, turnNumber));
+        PendingVotes.AddOrUpdate(player, new(player.Creature.CombatState, turnNumber, System.Environment.TickCount64));
 
         return new Dictionary<string, object?>
         {
@@ -125,6 +129,19 @@ public static partial class McpMod
             ["turn_status"] = "end_submitted",
             ["message"] = "End turn submitted. Check multiplayer state for readiness or the next turn."
         };
+    }
+
+    private sealed record PendingVote(object? Combat, int Turn, long Sent);
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Player, PendingVote> PendingVotes = new();
+
+    private static bool VoteInFlight(Player player)
+    {
+        if (!PendingVotes.TryGetValue(player, out var vote)) return false;
+        if (ReferenceEquals(player.Creature.CombatState, vote.Combat) && player.PlayerCombatState?.TurnNumber == vote.Turn && !CombatManager.Instance.IsPlayerReadyToEndTurn(player)
+            && System.Environment.TickCount64 - vote.Sent < 5000)
+            return true;
+        PendingVotes.Remove(player);
+        return false;
     }
 
     private static ActionBlock? GetUndoEndTurnBlock(Player? player)
@@ -148,6 +165,7 @@ public static partial class McpMod
         int turnNumber = player.PlayerCombatState!.TurnNumber;
         RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
             new UndoEndPlayerTurnAction(player, turnNumber));
+        PendingVotes.Remove(player);
 
         return new Dictionary<string, object?>
         {

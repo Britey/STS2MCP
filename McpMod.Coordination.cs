@@ -20,6 +20,12 @@ public static partial class McpMod
 
     private static string? GetPartyNameLanguage() => PartyNameLanguageReader.Value?.Invoke();
 
+    private static Dictionary<string, object?> ReadCoordinationDelta(int afterId) =>
+        ExecuteCoordination("coordination_state", new()
+        {
+            ["after_id"] = JsonSerializer.SerializeToElement(afterId)
+        });
+
     private static Dictionary<string, object?> ExecuteCoordination(string action, Dictionary<string, JsonElement> data)
     {
         if (action is not ("coordination_prompt" or "coordination_poll"))

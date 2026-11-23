@@ -19,6 +19,7 @@ using MegaCrit.Sts2.Core.Nodes.Events;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
+using MegaCrit.Sts2.Core.Nodes.Screens.ScreenContext;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Rooms;
@@ -115,7 +116,8 @@ public static partial class McpMod
     }
 
     private static Dictionary<string, object?> ExecutePlayableCard(Player player, int cardIndex,
-        string? targetId, CombatStateWait? wait, int? targetPlayerSlot = null)
+        string? targetId, CombatStateWait? wait, int? targetPlayerSlot = null,
+        System.Action<PlayCardAction>? onSubmitting = null)
     {
         var combatState = player.Creature.CombatState;
         if (combatState == null)
@@ -157,6 +159,10 @@ public static partial class McpMod
 
         // Play the card via the action queue (same path as the game UI)
         var play = new PlayCardAction(card, target);
+        if (wait != null && IsMultiplayerRun())
+            wait.MultiplayerPending = () => ReferenceEquals(player.Creature.CombatState, combatState) &&
+                (hand.Cards.Contains(card) || GetCombatActionBlock(player)?.Reason is "action_resolving" or "hand_not_ready");
+        onSubmitting?.Invoke(play);
         RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(play);
         if (wait != null)
             wait.CardCompletion = play.CompletionTask;
@@ -184,7 +190,7 @@ public static partial class McpMod
         };
     }
 
-    private static Dictionary<string, object?> ExecuteUsePotion(Player player, Dictionary<string, JsonElement> data)
+    private static Dictionary<string, object?> ExecuteUsePotion(Player player, Dictionary<string, JsonElement> data, CombatStateWait? wait = null)
     {
         if (!player.CanUseOrRemovePotions)
             return BlockedAction(new("potion_inventory_locked", "The game has locked potion use and removal during the current choice.", false));
@@ -255,6 +261,9 @@ public static partial class McpMod
                 break;
         }
 
+        if (wait != null)
+            wait.MultiplayerPending = () => ReferenceEquals(player.GetPotionAtSlotIndex(slot), potion) ||
+                GetCombatActionBlock(player)?.Reason is "action_resolving" or "hand_not_ready";
         potion.EnqueueManualUse(target);
 
         string targetMsg = target == player.Creature ? " on self" : target != null ? $" targeting {GetTargetName(target)}" : "";
@@ -372,7 +381,8 @@ public static partial class McpMod
 
     private static Dictionary<string, object?> ExecuteAdvanceDialogue()
     {
-        if (RunManager.Instance.DebugOnlyGetState()?.CurrentRoom is not EventRoom)
+        var run = RunManager.Instance.DebugOnlyGetState();
+        if (run?.CurrentRoom is not EventRoom room)
             return Error("Event room is not open");
 
         var layout = NEventRoom.Instance?.Layout;
@@ -386,7 +396,8 @@ public static partial class McpMod
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["message"] = "Advancing dialogue"
+            ["message"] = "Advancing dialogue",
+            ["event"] = BuildEventState(room, run)
         };
     }
 
@@ -478,6 +489,8 @@ public static partial class McpMod
         };
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MerchantEntry, string> PurchasedNames = new();
+
     private static Dictionary<string, object?> ExecuteShopPurchase(Player player, Dictionary<string, JsonElement> data)
     {
         MerchantInventory? inventory = null;
@@ -538,13 +551,24 @@ public static partial class McpMod
             return Error($"Not enough gold (need {entry.Cost}, have {player.Gold})");
 
         int price = entry.Cost;
+        string? itemName = entry switch
+        {
+            MerchantCardEntry c => SafeGetText(() => c.CreationResult?.Card?.Title),
+            MerchantRelicEntry r => SafeGetText(() => r.Model?.Title),
+            MerchantPotionEntry p => SafeGetText(() => p.Model?.Title),
+            MerchantCardRemovalEntry => "Card removal",
+            _ => entry.GetType().Name
+        };
         if (!TryStartMerchantPurchase(inventory, entry))
             return Error("Shop inventory changed. Read shop state before trying again.");
 
+        if (itemName != null) PurchasedNames.AddOrUpdate(entry, itemName);
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["message"] = $"Purchasing item for {price} gold"
+            ["purchase_status"] = "submitted",
+            ["item_index"] = index, ["item_name"] = itemName, ["price"] = price,
+            ["message"] = $"Purchasing {itemName} for {price} gold"
         };
     }
 
@@ -560,17 +584,60 @@ public static partial class McpMod
 
         int index = indexElem.GetInt32();
 
-        var travelable = FindAll<NMapPoint>(mapScreen)
-            .Where(mp => mp.State == MapPointState.Travelable && mp.Point != null)
-            .OrderBy(mp => mp.Point!.coord.col)
-            .ToList();
+        var travelable = GetTravelableMapPoints(mapScreen);
 
         if (travelable.Count == 0)
             return Error("No travelable map nodes available");
         if (index < 0 || index >= travelable.Count)
             return Error($"Map node index {index} out of range ({travelable.Count} options available)");
 
-        var target = travelable[index];
+        return SelectMapPoint(mapScreen, travelable[index], wait, mapVoter);
+    }
+
+    private static List<NMapPoint> GetTravelableMapPoints(NMapScreen screen) =>
+        FindAll<NMapPoint>(screen).Where(point => point.State == MapPointState.Travelable && point.Point != null)
+            .OrderBy(point => point.Point!.coord.col).ToList();
+
+    private static bool IsMapReadyForAutoAdvance(NMapScreen? screen) =>
+        screen is { IsOpen: true, IsTravelEnabled: true, IsDebugTravelEnabled: false } &&
+        !IsMultiplayerMapTraveling() &&
+        ActiveScreenContext.Instance.IsCurrent(screen) &&
+        GetOpenModalNode() == null &&
+        (Engine.GetMainLoop() is not SceneTree tree || !IsAnyFtueVisible(tree.Root));
+
+    private static Dictionary<string, object?>? TryAdvanceForcedMap(bool multiplayer, CombatStateWait? wait = null)
+    {
+        var manager = RunManager.Instance;
+        var screen = NMapScreen.Instance;
+        if (!manager.IsInProgress || manager.IsCleaningUp || manager.IsGameOver ||
+            IsMultiplayerRun() != multiplayer || (multiplayer && MultiplayerSequenceActive) ||
+            !IsMapReadyForAutoAdvance(screen) || manager.DebugOnlyGetState() is not { } run)
+            return null;
+
+        var player = LocalContext.GetMe(run);
+        if (player == null || (multiplayer && manager.MapSelectionSynchronizer.GetVote(player) != null))
+            return null;
+
+        // Recheck the live choices on the game thread immediately before selecting.
+        if (GetTravelableMapPoints(screen!) is not [var only])
+            return null;
+
+        var destination = only.Point!.coord;
+        var result = SelectMapPoint(screen!, only, wait, multiplayer ? player : null);
+        if (result.GetValueOrDefault("status") is not "ok")
+            return null;
+
+        return new()
+        {
+            ["action"] = multiplayer ? "voted" : "selected",
+            ["col"] = destination.col,
+            ["row"] = destination.row
+        };
+    }
+
+    private static Dictionary<string, object?> SelectMapPoint(NMapScreen mapScreen, NMapPoint target,
+        CombatStateWait? wait, Player? mapVoter)
+    {
         var pt = target.Point!;
         if (mapVoter != null)
         {
@@ -856,6 +923,16 @@ public static partial class McpMod
         };
     }
 
+    private static string SelectionTool(string name) => IsMultiplayerRun() ? "mp_" + name : name;
+
+    private static readonly ulong ChooseCardInputDelay =
+        HarmonyLib.AccessTools.Field(typeof(NChooseACardSelectionScreen), "_noSelectionTimeMsec")?.GetRawConstantValue() as ulong? ?? 0;
+
+    private static bool ChooseCardAcceptsInput(NChooseACardSelectionScreen screen) =>
+        GetInstanceFieldValue(screen, "_completionSource") is TaskCompletionSource<IEnumerable<CardModel>> completion &&
+        !completion.Task.IsCompleted && (GetInstanceFieldValue(screen, "_openedTicks") is not ulong ticks ||
+            Godot.Time.GetTicksMsec() - ticks > ChooseCardInputDelay);
+
     private static Dictionary<string, object?> ExecuteSelectCard(Dictionary<string, JsonElement> data)
     {
         var overlay = NOverlayStack.Instance?.Peek();
@@ -881,15 +958,23 @@ public static partial class McpMod
             var holder = holders[index];
             string cardName = SafeGetText(() => holder.CardModel?.Title) ?? "unknown";
             grid.EmitSignal(NCardGrid.SignalName.HolderPressed, holder);
-
+            bool stillOpen = IsLiveNode(gridScreen) && NOverlayStack.Instance?.Peek() == gridScreen;
+            bool canConfirm = stillOpen && GetCardSelectionControls(gridScreen).Confirm != null;
             return new Dictionary<string, object?>
             {
                 ["status"] = "ok",
+                ["selection_status"] = !stillOpen ? "screen_changed" : canConfirm ? "awaiting_confirmation" : "selecting",
+                ["confirmation_required"] = canConfirm,
+                ["next_tool"] = canConfirm ? SelectionTool("deck_confirm_selection") :
+                    stillOpen ? SelectionTool("deck_select_card") : null,
                 ["message"] = $"Toggling card selection: {cardName}"
             };
         }
         else if (overlay is NChooseACardSelectionScreen chooseScreen)
         {
+            if (!ChooseCardAcceptsInput(chooseScreen) ||
+                GetInstanceFieldValue(chooseScreen, "_completionSource") is not TaskCompletionSource<IEnumerable<CardModel>> completion)
+                return BlockedAction(new("selection_not_ready", "The card choice is not accepting input yet. Read the current state.", true));
             var holders = GetSelectableGridCards(chooseScreen);
             if (index < 0 || index >= holders.Count)
                 return Error($"Card index {index} out of range ({holders.Count} cards available)");
@@ -897,11 +982,14 @@ public static partial class McpMod
             var holder = holders[index];
             string cardName = SafeGetText(() => holder.CardModel?.Title) ?? "unknown";
             holder.EmitSignal(NCardHolder.SignalName.Pressed, holder);
-
+            if (!completion.Task.IsCompletedSuccessfully)
+                return Error("The game has not accepted the card choice. Read the current state.");
             return new Dictionary<string, object?>
             {
                 ["status"] = "ok",
-                ["message"] = $"Choosing card: {cardName}"
+                ["selection_status"] = "complete",
+                ["confirmation_required"] = false,
+                ["message"] = $"Selected {cardName}. This choice is complete."
             };
         }
 
@@ -1092,7 +1180,9 @@ public static partial class McpMod
     {
         var hand = NPlayerHand.Instance;
         if (hand == null || !hand.IsInCardSelection)
-            return Error("No in-combat card selection is active");
+            return NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen or NCardGridSelectionScreen
+                ? Error($"This is a deck card choice. Use {SelectionTool("deck_select_card")} with a displayed card_index.")
+                : Error("No in-combat card selection is active");
 
         if (!data.TryGetValue("card_index", out var indexElem))
             return Error("Missing 'card_index' (index of the card in hand)");
@@ -1122,7 +1212,14 @@ public static partial class McpMod
     {
         var hand = NPlayerHand.Instance;
         if (hand == null || !hand.IsInCardSelection)
-            return Error("No in-combat card selection is active");
+            return NOverlayStack.Instance?.Peek() switch
+            {
+                NChooseACardSelectionScreen => Error($"Use {SelectionTool("deck_select_card")} for this choice. It completes on selection."),
+                NCardGridSelectionScreen grid when GetCardSelectionControls(grid).Confirm != null =>
+                    Error($"Use {SelectionTool("deck_confirm_selection")} to confirm this grid selection."),
+                NCardGridSelectionScreen => Error($"Choose a card with {SelectionTool("deck_select_card")}."),
+                _ => Error("No in-combat card selection is active")
+            };
 
         var confirmBtn = GetEnabledSelectionButton<NConfirmButton>(hand, "%SelectModeConfirmButton");
         if (confirmBtn == null)
@@ -1209,7 +1306,9 @@ public static partial class McpMod
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["message"] = $"Claiming treasure relic: {relicName}"
+            ["choice_status"] = IsMultiplayerRun() ? "bid_submitted" : "submitted",
+            ["relic_index"] = index, ["relic_name"] = relicName,
+            ["message"] = IsMultiplayerRun() ? $"Bid submitted for {relicName}." : $"Claiming treasure relic: {relicName}"
         };
     }
 

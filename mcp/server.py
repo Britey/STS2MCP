@@ -10,11 +10,13 @@ import json
 import os
 import re
 import sys
+from itertools import count
 from pathlib import Path
 from typing import Annotated, Literal
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 mcp = FastMCP("sts2")
@@ -22,6 +24,34 @@ mcp = FastMCP("sts2")
 _base_url: str = "http://localhost:15526"
 _token_file: Path | None = None
 _http: httpx.AsyncClient | None = None
+
+# Each stdio server process serves exactly one MCP client and game seat.
+_coordination_request_ids = count(1)
+_last_coordination_request = 0
+_last_coordination_cursor = 0
+
+
+def _delivered_response(response: httpx.Response, request_id: int) -> str:
+    global _last_coordination_request, _last_coordination_cursor
+    value = response.text
+    if '"latest_id"' not in value or not value.lstrip().startswith("{"):
+        return value
+    try:
+        data = response.json()
+    except ValueError:
+        return value
+    state = data.get("state", data) if isinstance(data, dict) else None
+    chat = state.get("coordination", state) if isinstance(state, dict) else None
+    cursor = chat.get("latest_id") if isinstance(chat, dict) else None
+    if type(cursor) is int and request_id > _last_coordination_request:
+        _last_coordination_request, _last_coordination_cursor = request_id, cursor
+    return value
+
+
+def _coordination_after(explicit: int | None, wait_seconds: int) -> int:
+    if explicit is not None:
+        return explicit
+    return _last_coordination_cursor if wait_seconds else 0
 
 
 def _sp_url() -> str:
@@ -86,23 +116,28 @@ async def _get(params: dict | None = None, *, wait_for_ready: bool = False) -> s
     return r.text
 
 
-async def _post(body: dict) -> str:
-    timeout = {"timeout": httpx.Timeout(20, connect=10)} if body.get("return_state") else {}
-    r = await _get_client().post(_sp_url(), json=body, **timeout)
+async def _post(body: dict, *, params: dict | None = None) -> str:
+    waits_for_state = body.get("return_state") or body.get("action") == "advance_forced_map"
+    timeout = {"timeout": httpx.Timeout(20, connect=10)} if waits_for_state else {}
+    r = await _get_client().post(_sp_url(), params=params, json=body, **timeout)
     r.raise_for_status()
     return r.text
 
 
-async def _mp_get(params: dict | None = None) -> str:
-    r = await _get_client().get(_mp_url(), params=params)
+async def _mp_get(params: dict | None = None, *, wait_seconds: int = 0) -> str:
+    timeout = {"timeout": httpx.Timeout(wait_seconds + 10, connect=10)} if wait_seconds else {}
+    request_id = next(_coordination_request_ids)
+    r = await _get_client().get(_mp_url(), params=params, **timeout)
     r.raise_for_status()
-    return r.text
+    return _delivered_response(r, request_id)
 
 
-async def _mp_post(body: dict) -> str:
-    r = await _get_client().post(_mp_url(), json=body)
+async def _mp_post(body: dict, *, params: dict | None = None) -> str:
+    timeout = {"timeout": httpx.Timeout(body["wait_seconds"] + 10, connect=10)} if body.get("wait_seconds") else {}
+    request_id = next(_coordination_request_ids)
+    r = await _get_client().post(_mp_url(), params=params, json=body, **timeout)
     r.raise_for_status()
-    return r.text
+    return _delivered_response(r, request_id)
 
 
 async def _profile_get() -> str:
@@ -195,6 +230,7 @@ async def get_game_state(
     compact: bool = False,
     wait_for_ready: bool = False,
     language: Literal["game", "en", "zh-CN"] | None = None,
+    auto_advance_map: bool = False,
 ) -> str:
     """Get the current Slay the Spire 2 game state.
 
@@ -202,7 +238,8 @@ async def get_game_state(
     The state_type field indicates the current screen (combat, map, event, shop,
     fake_merchant, etc.).
     For active play, use compact=true and wait_for_ready=true to read hand, intents,
-    and resources in one call. Use return_state=true on card plays and end turns
+    and resources in one call. Use auto_advance_map=true while controlling the run to
+    skip a map decision with only one legal route. Use return_state=true on card plays and end turns
     to get the next state with the action receipt.
 
     Args:
@@ -212,6 +249,8 @@ async def get_game_state(
             Selection prompts and other screens return immediately. Check can_act or treasure readiness on return.
         language: Override the MCP Language setting for enemy, pet, and active status names.
             "zh-CN" uses Simplified Chinese, "en" uses English, and "game" follows the local client.
+        auto_advance_map: If the active map has exactly one legal destination, travel there
+            and return state with an auto_map receipt. Map forks still need map_choose_node.
     """
     try:
         params = {"format": format}
@@ -221,6 +260,8 @@ async def get_game_state(
             params["wait_for_ready"] = "true"
         if language is not None:
             params["language"] = language
+        if auto_advance_map:
+            return await _post({"action": "advance_forced_map"}, params=params)
         return await _get(params, wait_for_ready=wait_for_ready)
     except Exception as e:
         return _handle_error(e)
@@ -926,6 +967,11 @@ async def crystal_sphere_proceed() -> str:
 async def mp_get_game_state(
     format: str = "markdown",
     language: Literal["game", "en", "zh-CN"] | None = None,
+    compact: bool = False,
+    coordination_after_id: Annotated[int | None, Field(ge=0)] = None,
+    wait_for_ready: bool = False,
+    auto_advance_map: bool = False,
+    view: Literal["decision"] | None = None,
 ) -> str:
     """[Multiplayer] Get the current multiplayer game state.
 
@@ -940,17 +986,71 @@ async def mp_get_game_state(
     claiming, skipping, or proceeding.
     In combat, read player.status for your effects, players[].status for
     teammates' effects, and battle.enemies[].status for enemy effects.
+    For co-op play, call view="decision" to get a JSON snapshot with the hand, targets, intents,
+    teammate readiness and coordination as soon as visible. Show it directly to the model before
+    a combat loop: send a time-sensitive tactic immediately, even while battle.can_act is false.
+    The first read defaults coordination_after_id to zero. Leave wait_for_ready false at entry.
+    After announcing a tactic, wait_for_ready=true can fetch a playable hand. The hand can still be growing
+    during turn setup. Use a fresh turn ID for a guarded sequence once play opens.
+    Carry coordination.latest_id forward in each state or card sequence call.
+    Read incoming events there. Reply to direct teammate messages and briefly state a plan
+    or ask for input when sequencing, target choice, or route depends on the party.
+    Use auto_advance_map=true while controlling a seat to vote immediately when the route is forced.
 
     Args:
         format: "markdown" for human-readable output, "json" for structured data.
         language: Override the MCP Language setting for enemy, pet, and active status names.
             "zh-CN" uses Simplified Chinese, "en" uses English, and "game" follows the local client.
+        compact: Keep actionable state and counts, omit detailed deck and pile contents.
+        coordination_after_id: Include chat events after this cursor and current prompts and polls.
+            Outside decision view, omit to exclude chat. Start at 0 on a new run and use latest_id thereafter.
+        wait_for_ready: Wait briefly through a local combat animation or turn transition before
+            reading state. Returns promptly when your turn has ended or a choice is open.
+        auto_advance_map: Vote for the only legal route when you have no vote. The returned state
+            includes an auto_map receipt. On a route fork, coordinate and use mp_map_vote.
     """
     try:
         params = {"format": format}
+        if view is not None:
+            params["view"] = view
         if language is not None:
             params["language"] = language
+        if compact:
+            params["compact"] = True
+        if coordination_after_id is not None:
+            params["coordination_after_id"] = coordination_after_id
+        if wait_for_ready:
+            params["wait_for_ready"] = True
+        if auto_advance_map:
+            return await _mp_post({"action": "advance_forced_map"}, params=params)
         return await _mp_get(params)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+async def mp_combat_decision(
+    coordination_after_id: Annotated[int | None, Field(ge=0)] = None,
+    wait_seconds: Annotated[int, Field(ge=0, le=30)] = 0,
+    language: Literal["game", "en", "zh-CN"] | None = None,
+) -> str:
+    """[Multiplayer Combat] Start here. Read your hand, targets, intents, party readiness and chat together.
+
+    Call with no arguments on entry. Message with mp_coordination_message(text=..., all_players=true)
+    when timing matters. When battle.can_act, use mp_combat_play_card(card_index=..., target=...,
+    return_state=true), or mp_combat_play_sequence with battle.sequence_turn_id.
+    Use the returned state for the next play. After voting or while actions resolve, pass
+    wait_seconds=30. Waiting resumes from the last delivered coordination cursor by default.
+    The same call returns on local readiness, new coordination, a choice, combat exit, or timeout.
+    A timeout includes the current snapshot and state_wait_timed_out=true.
+    """
+    params = {"view": "decision", "coordination_after_id": _coordination_after(coordination_after_id, wait_seconds)}
+    if wait_seconds:
+        params["decision_wait_seconds"] = wait_seconds
+    if language is not None:
+        params["language"] = language
+    try:
+        return await _mp_get(params, wait_seconds=wait_seconds)
     except Exception as e:
         return _handle_error(e)
 
@@ -1046,12 +1146,16 @@ async def mp_coordination_poll(
 
 
 @mcp.tool()
-async def mp_coordination_state(after_id: Annotated[int, Field(ge=0)] = 0) -> str:
+async def mp_coordination_state(after_id: Annotated[int | None, Field(ge=0)] = None,
+                                wait_seconds: Annotated[int, Field(ge=0, le=30)] = 0) -> str:
     """[Multiplayer Coordination] Read your prompts and recent messages.
 
     Returns the incoming prompt, outgoing prompt or poll, and events after after_id. Use
     the returned latest_id for the next call within this run. This is a quick
     read. Allow a teammate time to respond between reads.
+    During normal play, read this same data in mp_get_game_state(coordination_after_id=...)
+    or the card sequence's returned state. Use this standalone tool when waiting specifically
+    for chat or a poll result.
 
     Use party_language when the host has selected a shared language.
     Otherwise use preferred_language for custom polls and party chat, or
@@ -1066,13 +1170,18 @@ async def mp_coordination_state(after_id: Annotated[int, Field(ge=0)] = 0) -> st
     an active prompt. Reply to a direct message with mp_coordination_message()
     using the event's sender_slot.
 
+    In any room, pass wait_seconds (1..30) to wait from the last cursor delivered to this client.
+    An explicit after_id overrides it. An immediate read with no cursor includes recent history.
     Keep the affected action on hold while the outgoing prompt is pending or
     waiting_for_teammate. If it is answered, refresh the fight state before
     executing the agreed action with its coordination_prompt_id. An expired
     or cancelled prompt no longer authorizes the proposed action.
     """
     try:
-        return await _mp_post({"action": "coordination_state", "after_id": after_id})
+        body = {"action": "coordination_state", "after_id": _coordination_after(after_id, wait_seconds)}
+        if wait_seconds:
+            body["wait_seconds"] = wait_seconds
+        return await _mp_post(body)
     except Exception as e:
         return _handle_error(e)
 
@@ -1120,6 +1229,8 @@ async def mp_coordination_message(
     message all connected teammates. Use mp_coordination_reply() for an answer
     to a specific prompt. For Simplified Chinese speakers, write the message
     in Simplified Chinese using official names from the game state or name lookup.
+    At the start of a human co-op run, send a short in-game introduction. During play,
+    reply to human messages and share decisions when acting together would change the outcome.
     """
     if all_players == (recipient_slot is not None):
         return "Error: supply recipient_slot or set all_players=true."
@@ -1143,10 +1254,64 @@ async def mp_coordination_cancel(prompt_id: Annotated[str, Field(min_length=1)])
         return _handle_error(e)
 
 
+class TargetHpRange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: str = Field(min_length=1)
+    min: int = Field(ge=1)
+    max: int = Field(ge=1)
+
+
+@mcp.tool()
+async def mp_combat_play_sequence(
+    plays: Annotated[list[PlannedCardPlay], Field(min_length=1, max_length=6)],
+    turn_id: Annotated[str, Field(min_length=1)],
+    end_turn: bool = False,
+    coordination_after_id: Annotated[int | None, Field(ge=0)] = None,
+    view: Literal["decision"] | None = None,
+    target_hp_range: TargetHpRange | None = None,
+) -> str:
+    """[Multiplayer Combat] Resolve a short guarded card plan and return compact game state.
+
+    Use the entire opaque battle.sequence_turn_id and distinct card indices and IDs from the same snapshot.
+    Decision views revalidate a plan when the shared queue advances in the same turn.
+    Handle new chat and pending prompts first. Provide coordination.latest_id if available.
+    The game resolves each card before the next and stops on other actions, incoming
+    coordination, choices, new cards or dangers, and changed enemies or turns.
+    Check submitted and stop_reason before replanning. Never replay the submitted prefix.
+    Use mp_combat_play_card for teammate targets or plays tied to a coordination prompt.
+
+    Args:
+        target_hp_range: At submission, accept an HP-only update on this planned living target within inclusive min/max.
+        view: Use "decision" for the next tactical snapshot, including on a guard stop.
+        plays: Up to six plays with original hand indices and expected card IDs.
+        turn_id: battle.sequence_turn_id from the snapshot used to build the plan.
+        end_turn: Submit ready if the whole plan settles and no playable cards remain.
+        coordination_after_id: Include chat events after this cursor in the returned state.
+    """
+    body = {
+        "action": "play_card_sequence",
+        "plays": [play.model_dump(exclude_none=True) for play in plays],
+        "turn_id": turn_id,
+        "end_turn": end_turn,
+    }
+    if target_hp_range is not None:
+        body["target_hp_range"] = target_hp_range.model_dump()
+    if view is not None:
+        body["view"] = view
+    if coordination_after_id is not None:
+        body["coordination_after_id"] = coordination_after_id
+    try:
+        return await _mp_post(body)
+    except Exception as e:
+        return _handle_error(e)
+
+
 @mcp.tool()
 async def mp_combat_play_card(
     card_index: int, target: str | None = None, coordination_prompt_id: str | None = None,
     target_player_slot: Annotated[int | None, Field(ge=0)] = None,
+    return_state: bool = False,
+    coordination_after_id: Annotated[int | None, Field(ge=0)] = None,
 ) -> str:
     """[Multiplayer Combat] Play a card from the local player's hand.
 
@@ -1154,6 +1319,9 @@ async def mp_combat_play_card(
     endpoint for sync safety.
 
     Args:
+        return_state: Include the next decision snapshot. If action_pending is true the
+            submitted action may still be resolving. Do not replay it.
+        coordination_after_id: Include events after this cursor in the returned state.
         card_index: Index of the card in hand (0-based).
         target: Enemy entity ID from the current combat. Required for enemy-targeted cards.
         target_player_slot: Required for AnyAlly or AnyPlayer cards. Use a living player's
@@ -1162,6 +1330,10 @@ async def mp_combat_play_card(
             Refresh the hand and enemy state before using it.
     """
     body: dict = {"action": "play_card", "card_index": card_index}
+    if return_state:
+        body["return_state"] = True
+        if coordination_after_id is not None:
+            body["coordination_after_id"] = coordination_after_id
     if target is not None:
         body["target"] = target
     if target_player_slot is not None:
@@ -1216,10 +1388,15 @@ async def mp_combat_undo_end_turn() -> str:
 async def mp_use_potion(
     slot: int, target: str | None = None, coordination_prompt_id: str | None = None,
     target_player_slot: Annotated[int | None, Field(ge=0)] = None,
+    return_state: bool = False,
+    coordination_after_id: Annotated[int | None, Field(ge=0)] = None,
 ) -> str:
     """[Multiplayer] Use a potion from the local player's potion slots.
 
     Args:
+        return_state: Include the next decision snapshot. If action_pending is true the
+            submitted action may still be resolving. Do not replay it.
+        coordination_after_id: Include events after this cursor in the returned state.
         slot: Potion slot index (as shown in game state).
         target: Enemy entity ID from the current combat. Required for enemy-targeted potions.
         target_player_slot: Living player's player_slot from the current players list.
@@ -1227,6 +1404,10 @@ async def mp_use_potion(
         coordination_prompt_id: Bind this action to an answered combat coordination prompt.
     """
     body: dict = {"action": "use_potion", "slot": slot}
+    if return_state:
+        body["return_state"] = True
+        if coordination_after_id is not None:
+            body["coordination_after_id"] = coordination_after_id
     if target is not None:
         body["target"] = target
     if target_player_slot is not None:
@@ -1396,7 +1577,9 @@ async def mp_proceed_to_map(leave_shop: bool = False) -> str:
 
 @mcp.tool()
 async def mp_deck_select_card(card_index: int) -> str:
-    """[Multiplayer Card Selection] Select or deselect a card in the card selection screen.
+    """[Multiplayer Card Selection] For state_type=card_select, choose a displayed card, including boss choices during combat.
+
+    A selection_status of "complete" finishes the choice. Confirm only when confirmation_required is true.
 
     Args:
         card_index: 0-based index of the card.
@@ -1458,7 +1641,7 @@ async def mp_bundle_cancel_selection() -> str:
 
 @mcp.tool()
 async def mp_combat_select_card(card_index: int) -> str:
-    """[Multiplayer Combat Selection] Select a card from hand during in-combat card selection.
+    """[Multiplayer Combat Selection] For state_type=hand_select, select a card in your combat hand.
 
     Args:
         card_index: 0-based index of the card in the selectable hand cards.

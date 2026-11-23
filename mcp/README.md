@@ -40,7 +40,7 @@ The MCP release pairs an in-game bridge with a local stdio server. The bridge ex
 
 ## Agent playbook
 
-1. **Read before acting.** Start with JSON. Use `get_game_state(format="json", compact=true, wait_for_ready=true)` for solo combat or `mp_get_game_state(format="json")` for co-op. Choose tools according to `state_type` and the options actually shown. Use `menu_select` for advertised menu options before the run begins.
+1. **Read before acting.** Start with JSON. Use `get_game_state(format="json", compact=true, wait_for_ready=true, auto_advance_map=true)` for solo play or `mp_get_game_state(view="decision", coordination_after_id=0, auto_advance_map=true)` for co-op. Omit `auto_advance_map` for passive observation. At battle entry, show the first visible hand and chat directly to the model. Announce timing-sensitive plays immediately, then check `battle.can_act` before submitting a card. Carry `coordination.latest_id` into the next read or action. Sequences accept `view="decision"`. Single cards and potions accept `return_state=true`. Choose tools according to `state_type` and the options actually shown. Use `menu_select` for advertised menu options before the run begins.
 2. **Check readiness and targets.** In a fight, read `battle.can_act`, `battle.warnings`, the enemy intents, and all active statuses before planning. Use the current `card_index` and target `entity_id`, even when the display name is translated. Use `target_player_slot` for a co-op card or potion aimed at a player. Refresh state after a hand change before reusing an index.
 3. **Resolve the outcome.** In solo combat, use `return_state=true` for individual plays, or `combat_play_sequence` for a short plan based on the starting hand. Read the submitted prefix and resulting state. If the game is animating, an action is pending, or a receipt times out, refresh state before retrying a mutation. If a selection opens, resolve it with the relevant selection tool.
 4. **Coordinate co-op moves.** Check incoming prompts and messages before committing a move that affects teammates. If you're waiting for consent, keep the move on hold until the prompt or poll is resolved. Use `run.map_coord` to verify the actual map destination after voting and `battle.can_undo_end_turn` to tell whether your end-turn vote can be reversed. [Combat coordination](#combat-coordination)
@@ -56,7 +56,7 @@ Example instruction to give your agent:
 
 | Tool | Scope | Description |
 |---|---|---|
-| `get_game_state(format?, compact?, wait_for_ready?, language?)` | General | Get current game state with optional transition waiting, compact output, and combat-name locale |
+| `get_game_state(format?, compact?, wait_for_ready?, language?, auto_advance_map?)` | General | Read game state with optional transition waiting, compact output, combat-name locale, and automatic forced-route travel |
 | `menu_select(option, seed?)` | General | Select a visible menu/game-over option |
 | `get_profile()` | Profiles | Get active profile progress |
 | `get_compendium()` | Profiles | Get active profile progress grouped like the in-game Compendium |
@@ -129,7 +129,9 @@ All multiplayer tools are prefixed with `mp_`. They route through `/api/v1/multi
 
 | Tool | Scope | Description |
 |---|---|---|
-| `mp_get_game_state(format?, language?)` | General | Get multiplayer game state (players, votes, bids) with optional combat-name locale |
+| `mp_get_game_state(format?, language?, compact?, coordination_after_id?, wait_for_ready?, auto_advance_map?)` | General | Read multiplayer state with optional compact output, chat updates, a short readiness wait, and automatic forced-route votes |
+| `mp_combat_decision(coordination_after_id?, wait_seconds?, language?)` | Combat | Read the hand, legal targets, readiness and chat together |
+| `mp_combat_play_sequence(plays, turn_id, end_turn?, coordination_after_id?, view?, target_hp_range?)` | Combat | Play a guarded sequence of up to six cards and return compact state |
 | `mp_combat_play_card(card_index, target?, coordination_prompt_id?, target_player_slot?)` | Combat | Play a card. Use a party `player_slot` for player-targeted cards. |
 | `mp_combat_end_turn(allow_playable_cards?, coordination_prompt_id?)` | Combat | Submit an end-turn vote. Set `allow_playable_cards=true` only to deliberately leave playable cards in hand. |
 | `mp_combat_undo_end_turn()` | Combat | Retract an end-turn vote while `battle.can_undo_end_turn` is true |
@@ -162,13 +164,17 @@ All multiplayer tools are prefixed with `mp_`. They route through `/api/v1/multi
 
 ### Combat Coordination
 
+In a human co-op run, send a short in-game greeting through `mp_coordination_message` and use it to reply or communicate a shared tactical decision. Read chat, prompts, polls, and party language in ordinary state reads via `coordination_after_id`. Pass the latest cursor to each read and sequence. Use the standalone coordination read when waiting for a specific answer.
+
+Use the `battle.sequence_turn_id` from the same snapshot as the starting hand indices and card IDs. A sequence stops on new coordination, other players' actions, a changed hand or enemy roster, a warning, a required choice, or a changed turn. Check its `submitted` prefix and plan from the returned `state`. Play teammate-targeted and prompt-bound cards individually. `end_turn=true` only submits ready if the plan settles and no playable cards remain.
+
 Install the same version of the Co-op Chat companion on every seat. Each AI seat also needs the MCP bridge and client. A human host needs the MCP bridge to set the party's MCP language. [Player install guide](../docs/chat-install.md)
 
 | Tool | Description |
 |---|---|
 | `mp_coordination_prompt(recipient_slot, options, question?, allow_text?, lifetime_seconds?)` | Ask one teammate a combat question. Use their zero-based slot in the multiplayer state's `players` array. |
 | `mp_coordination_poll(options?, question?, lifetime_seconds?, rule?)` | Ask every connected teammate to vote on the same combat question. |
-| `mp_coordination_state(after_id?)` | Read prompts, the outgoing poll, recent chat, and teammate languages by player slot. Use `latest_id` as the next `after_id` within the run. |
+| `mp_coordination_state(after_id?, wait_seconds?)` | Read prompts, the outgoing poll, recent chat, and teammate languages by player slot. Use `latest_id` as the next `after_id` within the run. |
 | `mp_coordination_reply(prompt_id, choice_index?, text?, go_ahead?)` | Submit one reply using a zero-based choice index, plain text, or `go_ahead=true`. |
 | `mp_coordination_message(text, recipient_slot?, all_players?)` | Send chat to one slot or set `all_players=true` to message everyone. |
 | `mp_coordination_cancel(prompt_id)` | Withdraw your outgoing prompt or poll by its ID. |

@@ -1102,7 +1102,7 @@ public static partial class McpMod
         return battle;
     }
 
-    private static Dictionary<string, object?> BuildPlayerState(Player player, bool compact = false, string? nameLanguage = null)
+    private static Dictionary<string, object?> BuildPlayerState(Player player, bool compact = false, string? nameLanguage = null, bool decision = false)
     {
         var state = new Dictionary<string, object?>();
         var creature = player.Creature;
@@ -1138,7 +1138,10 @@ public static partial class McpMod
             int cardIndex = 0;
             foreach (var card in combatState.Hand.Cards)
             {
-                hand.Add(BuildCardState(card, cardIndex));
+                var cardState = BuildCardState(card, cardIndex);
+                if (decision)
+                    AddDecisionTargets(cardState, player, card.TargetType, card.IsValidTarget);
+                hand.Add(cardState);
                 cardIndex++;
             }
             state["hand"] = hand;
@@ -1246,7 +1249,7 @@ public static partial class McpMod
         {
             if (potion != null)
             {
-                potions.Add(new Dictionary<string, object?>
+                var potionState = new Dictionary<string, object?>
                 {
                     ["id"] = potion.Id.Entry,
                     ["name"] = SafeGetText(() => potion.Title),
@@ -1255,7 +1258,24 @@ public static partial class McpMod
                     ["can_use_in_combat"] = potion.Usage == PotionUsage.CombatOnly || potion.Usage == PotionUsage.AnyTime,
                     ["target_type"] = potion.TargetType.ToString(),
                     ["keywords"] = BuildHoverTips(potion.ExtraHoverTips)
-                });
+                };
+                if (decision)
+                {
+                    AddDecisionTargets(potionState, player, potion.TargetType);
+                    try
+                    {
+                        potionState["can_use_now"] = player.CanUseOrRemovePotions && player.Creature.IsAlive &&
+                            !potion.IsQueued && potion.Usage != PotionUsage.Automatic &&
+                            (inCombat || potion.Usage != PotionUsage.CombatOnly) &&
+                            (!inCombat || GetCombatActionBlock(player) == null) && potion.PassesCustomUsabilityCheck;
+                    }
+                    catch (Exception)
+                    {
+                        // Custom potions may require UI context. Preserve the rest of the snapshot.
+                        potionState["can_use_now"] = null;
+                    }
+                }
+                potions.Add(potionState);
             }
             slotIndex++;
         }
@@ -1719,6 +1739,8 @@ public static partial class McpMod
                     item["entry_type"] = entry.GetType().Name;
                     break;
             }
+            if (!entry.IsStocked && PurchasedNames.TryGetValue(entry, out var soldName))
+                item["sold_name"] = soldName;
             items.Add(item);
         }
 
@@ -1840,13 +1862,8 @@ public static partial class McpMod
         var mapScreen = NMapScreen.Instance;
         if (mapScreen != null)
         {
-            var travelable = FindAll<NMapPoint>(mapScreen)
-                .Where(mp => mp.State == MapPointState.Travelable && mp.Point != null)
-                .OrderBy(mp => mp.Point!.coord.col)
-                .ToList();
-
             int index = 0;
-            foreach (var nmp in travelable)
+            foreach (var nmp in GetTravelableMapPoints(mapScreen))
             {
                 var pt = nmp.Point;
                 var option = BuildFuturePointInfo(pt);
@@ -1865,6 +1882,8 @@ public static partial class McpMod
             }
         }
         state["next_options"] = nextOptions;
+        if (nextOptions.Count == 1 && IsMapReadyForAutoAdvance(mapScreen))
+            state["forced_node_index"] = 0;
 
         // Full map - all nodes organized for planning
         var nodes = new List<Dictionary<string, object?>>();
@@ -2055,6 +2074,7 @@ public static partial class McpMod
         var state = new Dictionary<string, object?>();
 
         // Screen type
+        state["select_tool"] = SelectionTool("deck_select_card");
         state["screen_type"] = screen switch
         {
             NDeckTransformSelectScreen => "transform",
@@ -2112,6 +2132,8 @@ public static partial class McpMod
         state["preview_showing"] = preview != null;
         state["can_select"] = preview == null && cards.Count > 0;
         state["can_confirm"] = confirm != null;
+        if (confirm != null)
+            state["confirm_tool"] = SelectionTool("deck_confirm_selection");
         state["can_cancel"] = cancel != null;
         if (preview != null)
         {
@@ -2143,6 +2165,8 @@ public static partial class McpMod
     {
         var state = new Dictionary<string, object?>();
         state["screen_type"] = "choose";
+        state["select_tool"] = SelectionTool("deck_select_card");
+        state["confirmation_required"] = false;
 
         state["prompt"] = "Choose a card.";
 
@@ -2163,7 +2187,7 @@ public static partial class McpMod
 
         state["can_skip"] = GetEnabledSelectionButton<NClickableControl>(screen, "SkipButton") != null;
         state["preview_showing"] = false;
-        state["can_select"] = cards.Count > 0;
+        state["can_select"] = cards.Count > 0 && ChooseCardAcceptsInput(screen);
         state["can_confirm"] = false;
         state["can_cancel"] = state["can_skip"];
 
@@ -2279,6 +2303,9 @@ public static partial class McpMod
 
         // Confirm button state
         state["can_confirm"] = GetEnabledSelectionButton<NConfirmButton>(hand, "%SelectModeConfirmButton") != null;
+        state["select_tool"] = SelectionTool("combat_select_card");
+        if (state["can_confirm"] is true)
+            state["confirm_tool"] = SelectionTool("combat_confirm_selection");
 
         return state;
     }

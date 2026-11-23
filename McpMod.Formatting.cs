@@ -19,6 +19,20 @@ public static partial class McpMod
             sb.AppendLine($"# Game State: {stateType}");
         sb.AppendLine();
 
+        if (state.GetValueOrDefault("auto_map") is Dictionary<string, object?> autoMap)
+        {
+            string action = autoMap["action"] is "voted" ? "voted for" : "selected";
+            sb.AppendLine($"Automatically {action} the only travelable node ({autoMap["col"]},{autoMap["row"]}).");
+            sb.AppendLine();
+        }
+
+        if (state.GetValueOrDefault("coordination") is Dictionary<string, object?> coordination)
+        {
+            sb.AppendLine("## Co-op chat");
+            sb.AppendLine(System.Text.Json.JsonSerializer.Serialize(coordination, _compactJsonOptions));
+            sb.AppendLine();
+        }
+
         if (state.TryGetValue("run", out var runObj) && runObj is Dictionary<string, object?> run)
         {
             sb.AppendLine($"**Act {run["act"]}** | Floor {run["floor"]} | Ascension {run["ascension"]}");
@@ -644,6 +658,11 @@ public static partial class McpMod
 
                 bool stocked = item["is_stocked"] is true;
                 bool afford = item["can_afford"] is true;
+                if (!stocked)
+                {
+                    sb.AppendLine($"- [{item["index"]}] {item.GetValueOrDefault("sold_name") ?? category} — SOLD");
+                    continue;
+                }
                 string priceTag = stocked ? $"{item["price"]}g" : "SOLD";
                 string affordTag = stocked && !afford ? " (can't afford)" : "";
                 string saleTag = item.TryGetValue("on_sale", out var os) && os is true ? " **SALE**" : "";
@@ -670,6 +689,8 @@ public static partial class McpMod
     private static void FormatShopNavigationMarkdown(StringBuilder sb, Dictionary<string, object?> shop)
     {
         var actions = shop.GetValueOrDefault("available_actions") as List<Dictionary<string, object?>>;
+        if (actions?.Any(action => action.GetValueOrDefault("action") as string == "shop_purchase") == true)
+            sb.AppendLine("Purchase a stocked item with item_index from the list above.");
         var proceed = actions?.FirstOrDefault(action => action.GetValueOrDefault("action") as string == "proceed");
         var leave = actions?.FirstOrDefault(action => action.GetValueOrDefault("parameter") as string == "leave_shop");
         if (proceed != null)
@@ -736,13 +757,17 @@ public static partial class McpMod
         // Next options with future path trees
         if (map.TryGetValue("next_options", out var optObj) && optObj is List<Dictionary<string, object?>> options && options.Count > 0)
         {
-            sb.AppendLine("## Choose Next Node");
+            bool forced = map.ContainsKey("forced_node_index");
+            sb.AppendLine(forced ? "## Only Travelable Node" : "## Choose Next Node");
             foreach (var opt in options)
             {
                 sb.AppendLine($"- [{opt["index"]}] {FormatMapNodeLabel(opt, boldType: true)}");
-                string tree = BuildFuturePathTree(opt, nodeLookup);
-                if (tree.Length > 0)
-                    sb.AppendLine($"  Future paths: {tree}");
+                if (!forced)
+                {
+                    string tree = BuildFuturePathTree(opt, nodeLookup);
+                    if (tree.Length > 0)
+                        sb.AppendLine($"  Future paths: {tree}");
+                }
             }
             sb.AppendLine();
         }
@@ -944,11 +969,11 @@ public static partial class McpMod
 
         bool canConfirm = handSelect.TryGetValue("can_confirm", out var cc) && cc is true;
         if (mode == "upgrade_select" && canConfirm)
-            sb.AppendLine("Use `combat_confirm_selection()` to upgrade the selected card, or `combat_select_card(card_index)` to change the selection.");
+            sb.AppendLine($"Use `{SelectionTool("combat_confirm_selection")}()` to upgrade the selected card, or `{SelectionTool("combat_select_card")}(card_index)` to change the selection.");
         else if (canConfirm)
-            sb.AppendLine("Use `combat_confirm_selection()` to finish, or `combat_select_card(card_index)` to adjust the selection.");
+            sb.AppendLine($"Use `{SelectionTool("combat_confirm_selection")}()` to finish, or `{SelectionTool("combat_select_card")}(card_index)` to adjust the selection.");
         else
-            sb.AppendLine("Use `combat_select_card(card_index)` to select a card.");
+            sb.AppendLine($"Use `{SelectionTool("combat_select_card")}(card_index)` to select a card.");
         sb.AppendLine();
     }
 
@@ -1007,9 +1032,9 @@ public static partial class McpMod
                 sb.AppendLine($"Enchantment to apply: **{enchantment["name"]}** ({enchantment["amount"]})");
             }
             if (canConfirm)
-                sb.AppendLine("Use `confirm_selection()` to confirm the preview.");
+                sb.AppendLine($"Use `{SelectionTool("deck_confirm_selection")}()` to confirm the preview.");
             if (canCancel)
-                sb.AppendLine("Use `cancel_selection()` to return to the card grid.");
+                sb.AppendLine($"Use `{SelectionTool("deck_cancel_selection")}()` to return to the card grid.");
             if (cardSelect.TryGetValue("preview_cards", out var previewCardsObj) && previewCardsObj is List<Dictionary<string, object?>> previewCards && previewCards.Count > 0)
             {
                 sb.AppendLine("### Preview Cards");
@@ -1024,11 +1049,11 @@ public static partial class McpMod
         else
         {
             if (canSelect)
-                sb.AppendLine("Use `select_card(index)` to select a card.");
+                sb.AppendLine($"Use `{SelectionTool("deck_select_card")}(card_index)` to select a card.");
             if (canConfirm)
-                sb.AppendLine("Use `confirm_selection()` to continue. Some screens open a preview for a separate confirmation.");
+                sb.AppendLine($"Use `{SelectionTool("deck_confirm_selection")}()` to continue. Some screens open a preview for a separate confirmation.");
             if (canCancel)
-                sb.AppendLine("Use `cancel_selection()` to leave this selection.");
+                sb.AppendLine($"Use `{SelectionTool("deck_cancel_selection")}()` to leave this selection.");
         }
         sb.AppendLine();
     }
@@ -1310,6 +1335,9 @@ public static partial class McpMod
 
     private static void FormatTreasureBidsMarkdown(StringBuilder sb, Dictionary<string, object?> treasureData)
     {
+        if (treasureData.GetValueOrDefault("awards") is List<Award> awards)
+            foreach (var award in awards)
+                sb.AppendLine($"- Slot {award.PlayerSlot}: {award.RelicName ?? award.Outcome} ({award.Outcome})");
         if (treasureData.TryGetValue("is_bidding_phase", out var bp) && bp is not true)
             return;
 

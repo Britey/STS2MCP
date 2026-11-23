@@ -72,6 +72,14 @@ public static partial class McpMod
 
     private static List<CombatWarning> GetUnreportedCombatWarnings(ICombatState combatState, Creature player)
     {
+        var warnings = GetCurrentCombatWarnings(combatState, player);
+        if (CombatWarningsByEncounter.TryGetValue(combatState, out var reported))
+            warnings.RemoveAll(warning => reported.Contains(warning.EffectId));
+        return warnings;
+    }
+
+    private static List<CombatWarning> GetCurrentCombatWarnings(ICombatState combatState, Creature player)
+    {
         var warnings = new List<CombatWarning>();
         if (FindSandpitWarning(combatState, player) is { } sandpit)
         {
@@ -92,8 +100,6 @@ public static partial class McpMod
         CollectEnemyCombatWarnings(combatState, player, warnings);
         CollectPlayerCombatWarnings(combatState, player, warnings);
         CollectLethalCombatWarnings(combatState, player, warnings);
-        if (CombatWarningsByEncounter.TryGetValue(combatState, out var reported))
-            warnings.RemoveAll(warning => reported.Contains(warning.EffectId));
         return warnings;
     }
 
