@@ -23,6 +23,7 @@ public static partial class McpMod
     private const string ConfigFileName = "STS2_MCP.conf";
 
     private static HttpListener? _listener;
+    private static readonly string CoordinationSession = Guid.NewGuid().ToString("N");
     private static Thread? _serverThread;
     private static LocalApiAccess? _apiAccess;
     private static bool _allowProfileDelete;
@@ -216,6 +217,7 @@ public static partial class McpMod
             }
             else if (path == "/api/v1/multiplayer")
             {
+                response.Headers["X-STS2-Coordination-Session"] = CoordinationSession;
                 // Guard: reject multiplayer endpoint during singleplayer runs
                 if (!IsMultiplayerRun())
                 {
@@ -225,7 +227,7 @@ public static partial class McpMod
                 }
 
                 if (request.HttpMethod == "GET")
-                    HandleGetMultiplayerState(request, response);
+                    await HandleGetMultiplayerState(request, response).ConfigureAwait(false);
                 else if (request.HttpMethod == "POST")
                     await HandlePostMultiplayerAction(request, response).ConfigureAwait(false);
                 else
@@ -299,27 +301,58 @@ public static partial class McpMod
         catch { return false; }
     }
 
-    private static void HandleGetMultiplayerState(HttpListenerRequest request, HttpListenerResponse response)
+    private static async Task HandleGetMultiplayerState(HttpListenerRequest request, HttpListenerResponse response,
+        bool advanceForcedMap = false)
     {
         string format = request.QueryString["format"] ?? "json";
         if (!TryReadCombatNameLanguage(request, response, out string? nameLanguage))
             return;
         bool usePartyLanguage = request.QueryString["language"] == null;
+        bool decision = request.QueryString["view"] == "decision";
+        if (request.QueryString["view"] != null && !decision)
+        {
+            SendError(response, 400, "Supported view: decision.");
+            return;
+        }
+        if (decision)
+            format = "json";
+        int decisionWaitSeconds = 0;
+        if (request.QueryString["decision_wait_seconds"] is { } duration &&
+            (!decision || advanceForcedMap || !int.TryParse(duration, out decisionWaitSeconds) ||
+             decisionWaitSeconds is < 0 or > 30))
+        {
+            SendError(response, 400, "decision_wait_seconds requires a read-only decision view and an integer from 0 to 30.");
+            return;
+        }
+        bool compact = bool.TryParse(request.QueryString["compact"], out bool compactValue) && compactValue;
+        bool wait = bool.TryParse(request.QueryString["wait_for_ready"], out bool waitValue) && waitValue;
+        int? coordinationAfterId = null;
+        if (request.QueryString["coordination_after_id"] is { } cursor)
+        {
+            if (!int.TryParse(cursor, out int parsedCursor) || parsedCursor < 0)
+            {
+                SendError(response, 400, "coordination_after_id must be a non-negative integer.");
+                return;
+            }
+            coordinationAfterId = parsedCursor;
+        }
 
         try
         {
-            var stateTask = RunOnMainThread(() => BuildMultiplayerGameState(
-                usePartyLanguage ? GetPartyNameLanguage() ?? nameLanguage : nameLanguage));
-            var state = stateTask.GetAwaiter().GetResult();
+            var state = await ReadMultiplayerState(compact, nameLanguage, usePartyLanguage, coordinationAfterId,
+                advanceForcedMap, wait, decision, decisionWaitSeconds).ConfigureAwait(false);
 
             if (format == "markdown")
             {
+                if (state.GetValueOrDefault("coordination") is Dictionary<string, object?> chat &&
+                    GetCoordinationCursor(chat) is int delivered)
+                    response.Headers["X-STS2-Coordination-Cursor"] = delivered.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 string md = FormatAsMarkdown(state);
                 SendText(response, md, "text/markdown");
             }
             else
             {
-                SendJson(response, state);
+                SendJson(response, state, compact || decision);
             }
         }
         catch (Exception ex) when (ex is not MainThreadQueueTimeoutException)
@@ -364,6 +397,62 @@ public static partial class McpMod
 
         string action = actionElem.GetString() ?? "";
 
+        if (action == "advance_forced_map")
+        {
+            await HandleGetMultiplayerState(request, response, advanceForcedMap: true).ConfigureAwait(false);
+            return;
+        }
+
+        if (action == "coordination_state" && parsed.TryGetValue("wait_seconds", out var duration))
+        {
+            if (duration.ValueKind != JsonValueKind.Number || !duration.TryGetInt32(out int seconds) || seconds is < 0 or > 30 ||
+                !parsed.TryGetValue("after_id", out var id) || id.ValueKind != JsonValueKind.Number ||
+                !id.TryGetInt32(out int afterId) || afterId < 0)
+            {
+                SendError(response, 400, "Provide wait_seconds (0..30) and a non-negative after_id.");
+                return;
+            }
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
+            {
+                var chat = await RunOnMainThread(() => IsMultiplayerRun()
+                    ? ReadCoordinationDelta(afterId) : Error("No multiplayer run.")).ConfigureAwait(false);
+                var latest = GetCoordinationCursor(chat);
+                bool ready = !latest.HasValue || latest != afterId || HasIncomingCoordinationPrompt(chat);
+                if (ready || clock.Elapsed.TotalSeconds >= seconds)
+                {
+                    if (!ready && seconds > 0) chat["state_wait_timed_out"] = true;
+                    SendJson(response, chat, compact: true);
+                    return;
+                }
+                await Task.Delay(80).ConfigureAwait(false);
+            }
+        }
+
+        if (action == "play_card_sequence")
+        {
+            if (Interlocked.CompareExchange(ref _multiplayerSequenceActive, 1, 0) != 0)
+            {
+                var busy = await BuildSequenceResult([], false, MultiplayerSequenceInProgress,
+                    multiplayer: true, coordinationAfterId: 0, decision: true).ConfigureAwait(false);
+                busy["status"] = "error";
+                busy["error"] = MultiplayerSequenceInProgress.Message;
+                busy["reason"] = MultiplayerSequenceInProgress.Reason;
+                busy["retryable"] = true;
+                SendJson(response, busy, compact: true);
+                return;
+            }
+            try
+            {
+                SendJson(response, await ExecuteCardSequence(parsed, multiplayer: true).ConfigureAwait(false), compact: true);
+            }
+            finally
+            {
+                Volatile.Write(ref _multiplayerSequenceActive, 0);
+            }
+            return;
+        }
+
         // Menu actions (FTUE/popup dismissal, game-over, character select, etc.) are
         // scene-tree-driven and equally valid in MP. Route them to the shared handler
         // so MP clients can dismiss blocking FTUE prompts without going through the
@@ -374,7 +463,8 @@ public static partial class McpMod
             {
                 var option = parsed.TryGetValue("option", out var optElem) ? optElem.GetString() ?? "" : "";
                 var seed = parsed.TryGetValue("seed", out var seedElem) ? seedElem.GetString() : null;
-                var result = await RunOnMainThread(() => ExecuteMenuSelect(option, seed)).ConfigureAwait(false);
+                var result = await RunOnMainThread(() => MultiplayerSequenceActive
+                    ? BlockedAction(MultiplayerSequenceInProgress) : ExecuteMenuSelect(option, seed)).ConfigureAwait(false);
                 SendJson(response, result);
             }
             catch (Exception ex) when (ex is not MainThreadQueueTimeoutException)
@@ -386,11 +476,26 @@ public static partial class McpMod
 
         try
         {
-            var completion = await RunOnMainThread(() => ExecuteMultiplayerAction(action, parsed)).ConfigureAwait(false);
+            bool returnDecision = action is ("play_card" or "use_potion") &&
+                parsed.TryGetValue("return_state", out var requested) && requested.ValueKind == JsonValueKind.True;
+            int cursor = 0;
+            if (returnDecision && parsed.TryGetValue("coordination_after_id", out var cursorValue) &&
+                (cursorValue.ValueKind != JsonValueKind.Number || !cursorValue.TryGetInt32(out cursor) || cursor < 0))
+            {
+                SendError(response, 400, "coordination_after_id must be a non-negative integer.");
+                return;
+            }
+            var observation = returnDecision ? new CombatStateWait() : null;
+            var completion = await RunOnMainThread(() => ExecuteMultiplayerAction(action, parsed, observation)).ConfigureAwait(false);
             try
             {
                 var result = await completion.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-                SendJson(response, result);
+                if (observation == null && action is ("play_card" or "use_potion" or "end_turn") &&
+                    result.GetValueOrDefault("status") is "error")
+                    observation = new CombatStateWait();
+                if (observation != null)
+                    await AttachActionDecision(result, observation, cursor, action).ConfigureAwait(false);
+                SendJson(response, result, compact: returnDecision);
             }
             catch (TimeoutException) when (!completion.IsCompleted)
             {
@@ -404,7 +509,8 @@ public static partial class McpMod
         }
     }
 
-    private static async Task HandleGetState(HttpListenerRequest request, HttpListenerResponse response)
+    private static async Task HandleGetState(HttpListenerRequest request, HttpListenerResponse response,
+        bool advanceForcedMap = false)
     {
         string format = request.QueryString["format"] ?? "json";
         bool compact = bool.TryParse(request.QueryString["compact"], out bool compactValue) && compactValue;
@@ -414,8 +520,9 @@ public static partial class McpMod
 
         try
         {
-            var state = wait
-                ? (await ReadReadyState(compact, nameLanguage: nameLanguage).ConfigureAwait(false)).State
+            var state = wait || advanceForcedMap
+                ? (await ReadReadyState(compact, nameLanguage: nameLanguage, advanceForcedMap: advanceForcedMap,
+                    waitForReady: wait).ConfigureAwait(false)).State
                 : await RunOnMainThread(() => BuildGameState(compact, nameLanguage)).ConfigureAwait(false);
 
             if (format == "markdown")
@@ -476,6 +583,12 @@ public static partial class McpMod
         }
 
         string action = actionElem.GetString() ?? "";
+
+        if (action == "advance_forced_map")
+        {
+            await HandleGetState(request, response, advanceForcedMap: true).ConfigureAwait(false);
+            return;
+        }
 
         // Handle menu actions separately (no run required)
         if (action == "menu_select")

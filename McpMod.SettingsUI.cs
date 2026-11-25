@@ -1,10 +1,14 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using OpCodes = System.Reflection.Emit.OpCodes;
 using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.addons.mega_text;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.HoverTips;
 using MegaCrit.Sts2.Core.Nodes.Screens.Settings;
 using MegaCrit.Sts2.Core.Saves;
@@ -17,6 +21,39 @@ public static partial class McpMod
 {
     private static NFastModeTickbox? _instantModeTickbox;
     private static NFastModeTickbox? _originalFastModeTickbox;
+
+    [HarmonyPatch(typeof(NGame), "GameStartup", MethodType.Async)]
+    private static class PreserveSavedInstantMode
+    {
+        private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+        {
+            var code = instructions.ToList();
+            var prefs = AccessTools.PropertyGetter(typeof(SaveManager), nameof(SaveManager.PrefsSave));
+            var manager = AccessTools.PropertyGetter(typeof(SaveManager), nameof(SaveManager.Instance));
+            var readSpeed = AccessTools.PropertyGetter(prefs.ReturnType, nameof(SaveManager.Instance.PrefsSave.FastMode));
+            var writeSpeed = AccessTools.PropertySetter(prefs.ReturnType, nameof(SaveManager.Instance.PrefsSave.FastMode));
+            // Release builds downgrade a loaded Instant preference to Fast at startup.
+            // Target only that assignment so other startup logic and speed choices are preserved.
+            var matches = new List<int>();
+            for (int i = 0; i + 6 < code.Count; i++)
+            {
+                if (code[i].Calls(readSpeed) && code[i + 1].LoadsConstant((int)FastModeType.Instant)
+                    && (code[i + 2].opcode == OpCodes.Bne_Un_S || code[i + 2].opcode == OpCodes.Bne_Un)
+                    && code[i + 3].Calls(manager) && code[i + 4].Calls(prefs)
+                    && code[i + 5].LoadsConstant((int)FastModeType.Fast) && code[i + 6].Calls(writeSpeed))
+                    matches.Add(i + 5);
+            }
+            if (matches.Count == 1)
+            {
+                var speed = code[matches[0]];
+                speed.opcode = OpCodes.Ldc_I4;
+                speed.operand = (int)FastModeType.Instant;
+            }
+            else
+                GD.PrintErr($"[STS2 MCP] Found {matches.Count} Instant startup downgrade sites; check game compatibility.");
+            return code;
+        }
+    }
 
     private static bool IsInInstantModeLine(Node node)
     {
@@ -200,11 +237,11 @@ public static partial class McpMod
         {
             if (!IsInInstantModeLine(__instance)) return;
 
-            // Build a HoverTip with custom strings via reflection
-            // (HoverTip is a record struct; Title/Description have private setters)
-            object boxed = (object)default(HoverTip);
+            // Keep the native tip's initialized identity and icon. Its text setters are private.
+            var field = typeof(NFastModeHoverTip).GetField("_hoverTip", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field?.GetValue(__instance) is not HoverTip original) return;
+            object boxed = original;
             var ht = typeof(HoverTip);
-            ht.GetProperty("Id")!.SetValue(boxed, "sts2mcp_instant_mode");
             ht.GetProperty("Title")!.GetSetMethod(true)!
                 .Invoke(boxed, ["Instant Mode"]);
             ht.GetProperty("Description")!.GetSetMethod(true)!
@@ -214,10 +251,7 @@ public static partial class McpMod
                     "Can reduce token usage as get-state calls will no longer receive an intermediate state."
                 ]);
 
-            // Replace the _hoverTip field set by the original _Ready
-            typeof(NFastModeHoverTip)
-                .GetField("_hoverTip", BindingFlags.NonPublic | BindingFlags.Instance)
-                ?.SetValue(__instance, (IHoverTip)boxed);
+            field.SetValue(__instance, (IHoverTip)boxed);
         }
     }
 }

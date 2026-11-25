@@ -66,6 +66,22 @@ public static partial class CoordinationMod
     private static ulong[] _chatRecipientIds = [];
     private static readonly Queue<MessageEvent> Messages = new();
     private static int _nextEventId;
+    private sealed record PromptProgress(Prompt? Incoming, string? IncomingStatus, Prompt? Outgoing,
+        string? OutgoingStatus, GroupPoll? Poll, string? PollStatus, int Votes);
+    private static PromptProgress _lastPromptProgress = new(null, null, null, null, null, null, 0);
+
+    private static int GetCoordinationCursor()
+    {
+        // Ballots are append-only. A status change covers replies, expiry, cancellation and the host tiebreak.
+        var progress = new PromptProgress(_incoming, _incoming?.Status, _outgoing, _outgoing?.Status,
+            _outgoingPoll, _outgoingPoll?.Status, _outgoingPoll?.Responses.Count ?? 0);
+        if (progress != _lastPromptProgress)
+        {
+            _lastPromptProgress = progress;
+            _nextEventId++;
+        }
+        return _nextEventId;
+    }
     private static long _lastTick;
 
     public static void Initialize()
@@ -623,7 +639,7 @@ public static partial class CoordinationMod
             name = GetName(id),
             language = TeammateLanguages.GetValueOrDefault(id)
         }).ToArray(),
-        latest_id = _nextEventId
+        latest_id = GetCoordinationCursor()
     };
 
     private static object Describe(Prompt prompt) => new
