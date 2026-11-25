@@ -25,7 +25,8 @@ namespace STS2_MCP;
 
 public static partial class McpMod
 {
-    private static Dictionary<string, object?> BuildMultiplayerGameState(string? nameLanguage)
+    private static Dictionary<string, object?> BuildMultiplayerGameState(string? nameLanguage,
+        bool compact = false, int? coordinationAfterId = null, bool decision = false)
     {
         var result = new Dictionary<string, object?>();
         var tree = Engine.GetMainLoop() as SceneTree;
@@ -38,7 +39,14 @@ public static partial class McpMod
         {
             var ftueState = BuildVisibleFtueState(tree.Root);
             if (ftueState != null)
+            {
+                if (decision && IsMultiplayerRun())
+                {
+                    ftueState["view"] = "decision";
+                    ftueState["coordination"] = ReadCoordinationDelta(coordinationAfterId ?? 0);
+                }
                 return ftueState;
+            }
         }
 
         if (!RunManager.Instance.IsInProgress)
@@ -226,7 +234,7 @@ public static partial class McpMod
             else
             {
                 result["state_type"] = "treasure";
-                result["treasure"] = BuildMultiplayerTreasureState(treasureRoom, runState, nameLanguage);
+                result["treasure"] = BuildMultiplayerTreasureState(treasureRoom, runState, nameLanguage, openChest: !decision);
             }
         }
         else
@@ -249,14 +257,21 @@ public static partial class McpMod
         // All players summary (always included for multiplayer)
         result["players"] = BuildAllPlayersState(runState, nameLanguage);
 
-        // Always include full local player data (relics, potions, deck, etc.) on every screen,
-        // matching singleplayer behavior from BuildGameState()
         if (localPlayer != null)
         {
-            result["player"] = BuildPlayerState(localPlayer, nameLanguage: nameLanguage);
+            result["player"] = BuildPlayerState(localPlayer, compact || decision, nameLanguage, decision);
         }
 
+        if (decision || coordinationAfterId.HasValue)
+            result["coordination"] = ReadCoordinationDelta(coordinationAfterId ?? 0);
         AddCombatWarnings(result, localPlayer?.Creature, nameLanguage);
+        if (decision)
+        {
+            result["view"] = "decision";
+            AttachDecisionWarningTargets(result);
+            if (localPlayer != null)
+                RememberSequenceObservation(localPlayer, nameLanguage, result);
+        }
         return result;
     }
 
@@ -276,6 +291,9 @@ public static partial class McpMod
         battle["is_play_phase"] = IsPlayPhase(combatState);
         var localPlayer = LocalContext.GetMe(runState);
         AddCombatReadiness(battle, localPlayer);
+        if (battle["can_act"] is true && localPlayer?.PlayerCombatState != null)
+            battle["sequence_turn_id"] = GetSequenceTurnId(combatState, localPlayer);
+        battle["end_turn_pending"] = localPlayer != null && VoteInFlight(localPlayer);
         battle["can_undo_end_turn"] = GetUndoEndTurnBlock(localPlayer) == null;
         battle["all_players_ready"] = CombatManager.Instance.AllPlayersReadyToEndTurn();
 
@@ -315,6 +333,8 @@ public static partial class McpMod
                 : allVoted ? "resolving_votes"
                 : votes.Any(v => v["is_local"] is true && v["voted"] is true) ? "waiting_for_teammates"
                 : "awaiting_local_vote";
+            if (state["vote_phase"] is not "awaiting_local_vote")
+                state.Remove("forced_node_index");
         }
         catch
         {
@@ -372,13 +392,14 @@ public static partial class McpMod
         return state;
     }
 
-    private static Dictionary<string, object?> BuildMultiplayerTreasureState(TreasureRoom treasureRoom, RunState runState, string? nameLanguage)
+    private static Dictionary<string, object?> BuildMultiplayerTreasureState(TreasureRoom treasureRoom, RunState runState, string? nameLanguage, bool openChest)
     {
         // Auto-open chest same as singleplayer. BeginRelicPicking() runs during
         // TreasureRoom.Enter(), so relics are already generated. The chest click
         // just triggers the UI animation + gold via OneOffSynchronizer - same path
         // as a human click or the game's own AutoSlay handler.
-        var state = BuildTreasureState(treasureRoom, runState);
+        var state = BuildTreasureState(treasureRoom, runState, openChest);
+        if (TreasureAwards.TryGetValue(treasureRoom, out var awards)) state["awards"] = awards;
 
         // Add per-player bid data
         try

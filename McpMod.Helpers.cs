@@ -150,7 +150,10 @@ public static partial class McpMod
                         string path = text[contentStart..closeTag];
                         int lastSlash = path.LastIndexOf('/');
                         string filename = lastSlash >= 0 ? path[(lastSlash + 1)..] : path;
-                        sb.Append('[').Append(filename).Append(']');
+                        if (filename.EndsWith("_energy_icon.png", StringComparison.OrdinalIgnoreCase))
+                            sb.Append("[Energy]");
+                        else
+                            sb.Append('[').Append(filename).Append(']');
                         i = closeTag + 6; // length of "[/img]"
                         continue;
                     }
