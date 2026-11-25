@@ -2452,7 +2452,7 @@ public static partial class McpMod
         return state;
     }
 
-    private static Dictionary<string, object?> BuildTreasureState(TreasureRoom treasureRoom, RunState runState)
+    private static Dictionary<string, object?> BuildTreasureState(TreasureRoom treasureRoom, RunState runState, bool openChest = true)
     {
         var state = new Dictionary<string, object?>
         {
@@ -2469,10 +2469,13 @@ public static partial class McpMod
         }
 
         // Preserve the existing auto-open behavior, using the live native control only once.
-        if (TryOpenTreasureChest(treasure))
+        if (GetAvailableTreasureChest(treasure) is { } chest)
         {
-            state["status"] = "opening";
-            state["message"] = "Opening chest. Check the treasure state again after it opens.";
+            if (openChest)
+                chest.ForceClick();
+            state["status"] = openChest ? "opening" : "closed";
+            state["message"] = openChest ? "Opening chest. Check the treasure state again after it opens."
+                : "The chest is closed. Use mp_get_game_state() to open it.";
             return state;
         }
 

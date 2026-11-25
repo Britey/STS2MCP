@@ -29,22 +29,34 @@ _http: httpx.AsyncClient | None = None
 _coordination_request_ids = count(1)
 _last_coordination_request = 0
 _last_coordination_cursor = 0
+_coordination_session: str | None = None
 
 
 def _delivered_response(response: httpx.Response, request_id: int) -> str:
-    global _last_coordination_request, _last_coordination_cursor
+    global _last_coordination_request, _last_coordination_cursor, _coordination_session
     value = response.text
-    if '"latest_id"' not in value or not value.lstrip().startswith("{"):
+    cursor_header = response.headers.get("X-STS2-Coordination-Cursor")
+    if cursor_header is not None and cursor_header.isascii() and cursor_header.isdecimal():
+        cursor = int(cursor_header)
+    elif '"latest_id"' in value and value.lstrip().startswith("{"):
+        try:
+            data = response.json()
+        except ValueError:
+            return value
+        state = data.get("state", data) if isinstance(data, dict) else None
+        chat = state.get("coordination", state) if isinstance(state, dict) else None
+        cursor = chat.get("latest_id") if isinstance(chat, dict) else None
+    else:
         return value
-    try:
-        data = response.json()
-    except ValueError:
-        return value
-    state = data.get("state", data) if isinstance(data, dict) else None
-    chat = state.get("coordination", state) if isinstance(state, dict) else None
-    cursor = chat.get("latest_id") if isinstance(chat, dict) else None
-    if type(cursor) is int and request_id > _last_coordination_request:
-        _last_coordination_request, _last_coordination_cursor = request_id, cursor
+    if type(cursor) is int:
+        session = response.headers.get("X-STS2-Coordination-Session")
+        if session != _coordination_session:
+            if request_id < _last_coordination_request:
+                return value
+            _coordination_session = session
+            _last_coordination_cursor = 0
+        _last_coordination_request = max(request_id, _last_coordination_request)
+        _last_coordination_cursor = max(cursor, _last_coordination_cursor)
     return value
 
 

@@ -49,8 +49,7 @@ public static partial class McpMod
             try { hpRange = range.Deserialize<TargetHpRange>(_jsonOptions); }
             catch (JsonException) { return Error("Invalid target_hp_range."); }
             if (!multiplayer || hpRange == null || string.IsNullOrEmpty(hpRange.Target) ||
-                hpRange.Min < 1 || hpRange.Max < hpRange.Min ||
-                !plays.Any(p => p?.Target == hpRange.Target))
+                hpRange.Min < 1 || hpRange.Max < hpRange.Min)
                 return Error("Provide a planned target and a positive, inclusive HP range.");
         }
         if (multiplayer)
@@ -121,8 +120,8 @@ public static partial class McpMod
         }
         finally
         {
-            if (mp != null)
-                await RunOnMainThread(() => { mp.Dispose(); return true; }).ConfigureAwait(false);
+            // Dispose only removes a managed event handler, even if the game stops pumping frames.
+            mp?.Dispose();
         }
 
         return await BuildSequenceResult(submitted, false, stop, multiplayer: multiplayer,
@@ -164,6 +163,9 @@ public static partial class McpMod
                 return (null, new("target_mismatch", "A planned target is missing or is no longer alive.", false));
             bound.Add(new SequencePlay(card, card.Id.Entry, play.Target));
         }
+
+        if (hpRange != null && !bound.Any(play => play.Card.TargetType == TargetType.AnyEnemy && play.Target == hpRange.Target))
+            return (null, new("target_mismatch", "The HP range must name an enemy targeted by a planned card.", false));
 
         MultiplayerSequence? mp = null;
         if (multiplayer)

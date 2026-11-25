@@ -29,3 +29,20 @@ Assert-Policy '[]' '{"card_cost":1}' 'enemies_changed'
 Assert-Policy '[{"entity_id":"TEST_0","hp":49,"status":[],"modded_effect":7}]' '{"card_cost":1}' 'enemies_changed'
 Assert-Policy '[{"entity_id":"TEST_0","hp":49,"status":[]}]' '{"card_cost":2}' 'player_state_changed'
 'Verified HP-only acceptance, dead and removed targets, modded fields and changed card cost.'
+
+$recover = $mod.GetMethod('AddRecovery', [Reflection.BindingFlags]'Static,NonPublic')
+$state = [Collections.Generic.Dictionary[string,object]]::new()
+$handChoice = [Collections.Generic.Dictionary[string,object]]::new()
+$handChoice['select_tool'] = 'mp_combat_select_card'
+$handChoice['confirm_tool'] = 'mp_combat_confirm_selection'
+$state['hand_select'] = $handChoice
+$state['battle'] = [Collections.Generic.Dictionary[string,object]]::new()
+$state['battle']['can_act'] = $false
+foreach ($canConfirm in $false, $true) {
+    $receipt = [Collections.Generic.Dictionary[string,object]]::new()
+    $handChoice['can_confirm'] = $canConfirm
+    $recover.Invoke($null, @($receipt, $state, $null))
+    $expectedTool = if ($canConfirm) { $handChoice['confirm_tool'] } else { $handChoice['select_tool'] }
+    if ($receipt['next_tool'] -ne $expectedTool) { throw "Expected $expectedTool during hand selection." }
+}
+'Verified hand selection and confirmation recovery.'

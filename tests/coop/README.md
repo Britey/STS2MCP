@@ -17,7 +17,7 @@ python tests/coop/verify_recovery.py "<run>" race
 
 | Case | Starting position |
 |---|---|
-| `race` | Three players in round one against a single target that survives the opening strikes. The guest has a plain Strike, the host has a playable attack, and the third seat can play and vote. |
+| `race` | Three players in round one against a single target that survives the opening strikes. The guest has a plain Strike, the host has a playable attack and a playable self-targeting card, and the third seat can play and vote. |
 | `treasure-instant`, `treasure-normal` | Two seats at an unclaimed chest with two different relics. Set each seat's speed before launch. Both bid for the first relic. The verifier checks the awards and inventories and times when both seats can proceed. |
 | `shop` | Both seats in a shop, each able to buy a card. The verifier checks the receipt, exact deck and gold changes, sold row, chat wait, and map exit. |
 | `event` | The guest is in the Tezcatara dialogue before the choice at index 2. The verifier advances the dialogue and chooses that option. |

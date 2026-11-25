@@ -23,6 +23,7 @@ public static partial class McpMod
     private const string ConfigFileName = "STS2_MCP.conf";
 
     private static HttpListener? _listener;
+    private static readonly string CoordinationSession = Guid.NewGuid().ToString("N");
     private static Thread? _serverThread;
     private static LocalApiAccess? _apiAccess;
     private static bool _allowProfileDelete;
@@ -216,6 +217,7 @@ public static partial class McpMod
             }
             else if (path == "/api/v1/multiplayer")
             {
+                response.Headers["X-STS2-Coordination-Session"] = CoordinationSession;
                 // Guard: reject multiplayer endpoint during singleplayer runs
                 if (!IsMultiplayerRun())
                 {
@@ -342,6 +344,9 @@ public static partial class McpMod
 
             if (format == "markdown")
             {
+                if (state.GetValueOrDefault("coordination") is Dictionary<string, object?> chat &&
+                    GetCoordinationCursor(chat) is int delivered)
+                    response.Headers["X-STS2-Coordination-Cursor"] = delivered.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 string md = FormatAsMarkdown(state);
                 SendText(response, md, "text/markdown");
             }
@@ -413,9 +418,10 @@ public static partial class McpMod
                 var chat = await RunOnMainThread(() => IsMultiplayerRun()
                     ? ReadCoordinationDelta(afterId) : Error("No multiplayer run.")).ConfigureAwait(false);
                 var latest = GetCoordinationCursor(chat);
-                if (!latest.HasValue || latest != afterId || clock.Elapsed.TotalSeconds >= seconds)
+                bool ready = !latest.HasValue || latest != afterId || HasIncomingCoordinationPrompt(chat);
+                if (ready || clock.Elapsed.TotalSeconds >= seconds)
                 {
-                    if (latest == afterId && seconds > 0) chat["state_wait_timed_out"] = true;
+                    if (!ready && seconds > 0) chat["state_wait_timed_out"] = true;
                     SendJson(response, chat, compact: true);
                     return;
                 }

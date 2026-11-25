@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Text.Json;
 using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
@@ -128,9 +127,7 @@ public static partial class McpMod
         if (block == null || (!block.Retryable && block.Reason is not ("turn_already_ended" or "end_turn_pending")))
             return false;
         var chat = ReadCoordinationDelta(cursor);
-        if (GetCoordinationCursor(chat) > cursor ||
-            (chat.GetValueOrDefault("incoming_prompt") is JsonElement { ValueKind: JsonValueKind.Object } prompt &&
-             prompt.TryGetProperty("status", out var status) && status.GetString() == "pending"))
+        if ((GetCoordinationCursor(chat) is int latest && latest != cursor) || HasIncomingCoordinationPrompt(chat))
             return false;
         return Godot.Engine.GetMainLoop() is Godot.SceneTree tree && !IsAnyFtueVisible(tree.Root);
     }

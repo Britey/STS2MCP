@@ -89,6 +89,28 @@ def chat():
         assert call("guest", "mp_coordination_message", all_players=True, text="Test purchase complete.")["status"] == "ok"
         wake = future.result()
     assert wake["latest_id"] > cursor and not wake.get("state_wait_timed_out")
+    quiet = call("host", "mp_coordination_state", wait_seconds=1)
+    assert quiet.get("state_wait_timed_out") and quiet["latest_id"] == wake["latest_id"], quiet
+    text = "Ready to leave the shop."
+    assert call("guest", "mp_coordination_message", all_players=True, text=text)["status"] == "ok"
+    until(lambda: call("host", "mp_get_game_state", coordination_after_id=wake["latest_id"]), lambda md: text in md)
+    assert call("host", "mp_coordination_state", wait_seconds=1).get("state_wait_timed_out")
+
+
+def poll_without_chat():
+    cursor = call("guest", "mp_coordination_state")["latest_id"]
+    with ThreadPoolExecutor() as executor:
+        waiting = executor.submit(call, "guest", "mp_coordination_state", after_id=cursor, wait_seconds=8)
+        poll = call("host", "mp_coordination_poll", rule="any_yes", question="Ready to start?")
+        poll_id = poll["outgoing_poll"]["poll_id"]
+        incoming = waiting.result()
+        assert not incoming.get("state_wait_timed_out") and incoming["incoming_prompt"]["poll_id"] == poll_id
+        cursor = call("host", "mp_coordination_state")["latest_id"]
+        waiting = executor.submit(call, "host", "mp_coordination_state", after_id=cursor, wait_seconds=8)
+        assert call("guest", "mp_coordination_reply", prompt_id=incoming["incoming_prompt"]["prompt_id"],
+                    choice_index=0)["status"] == "ok"
+        answered = waiting.result()
+        assert not answered.get("state_wait_timed_out") and answered["outgoing_poll"]["status"] == "answered"
 
 
 def shop():
@@ -126,6 +148,8 @@ def event():
 
 
 def race():
+    until(lambda: combat("host"), lambda v: v.get("battle", {}).get("can_act"))
+    poll_without_chat()
     first = {s: combat(s) for s in seats}
     assert all(v["player_count"] == 3 for v in first.values())
     for tool, params in (("mp_combat_play_card", {"card_index": 999}), ("mp_use_potion", {"slot": 999})):
@@ -141,6 +165,12 @@ def race():
     after = until(lambda: combat("host"), lambda v: v["battle"]["can_act"] and v["battle"]["enemies"][0]["hp"] < start)
     hp = after["battle"]["enemies"][0]["hp"]
     card = next(c for c in first["host"]["player"]["hand"] if target in c.get("legal_enemy_ids", []) and c["can_play"])
+    untargeted = next(c for c in first["host"]["player"]["hand"] if c["target_type"] == "Self" and c["can_play"])
+    rejected = call("host", "mp_combat_play_sequence",
+                    turn_id=first["host"]["battle"]["sequence_turn_id"],
+                    plays=[dict(card_index=untargeted["index"], card_id=untargeted["id"], target=target)],
+                    target_hp_range=dict(target=target, min=hp, max=start))
+    assert rejected["stop_reason"] == "target_mismatch" and rejected["submitted"] == [], rejected
     plan = dict(plays=[dict(card_index=card["index"], card_id=card["id"], target=target)],
                 turn_id=first["host"]["battle"]["sequence_turn_id"], view="decision")
     for extra in ({}, {"target_hp_range": dict(target=target, min=start, max=start)}):
@@ -191,7 +221,13 @@ def race():
 
 for s in seats:
     until(lambda: (run / s / "ready.json").exists(), bool, 35)
-    until(lambda: state(s), lambda v: v.get("run", {}).get("floor"), 40)
+    if case.startswith("treasure") and not case.endswith("control"):
+        def read_chest():
+            return call(s, "mp_combat_decision").get("treasure", {}).get("status")
+        until(read_chest, lambda status: status == "closed", 40)
+        assert read_chest() == "closed"
+    else:
+        until(lambda: state(s), lambda v: v.get("run", {}).get("floor"), 40)
 if case.startswith("treasure"):
     treasure(case.endswith("control"))
 else:

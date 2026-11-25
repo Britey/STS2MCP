@@ -83,10 +83,15 @@ public static partial class McpMod
             IsNodeVisible(room) && ActiveScreenContext.Instance.IsCurrent(room));
     }
 
-    private static bool TryOpenTreasureChest(NTreasureRoom treasure)
+    private static NClickableControl? GetAvailableTreasureChest(NTreasureRoom treasure)
     {
         var chest = treasure.GetNodeOrNull<NClickableControl>("Chest");
-        if (chest == null || !IsControlVisibleOrActionable(chest))
+        return chest != null && IsControlVisibleOrActionable(chest) ? chest : null;
+    }
+
+    private static bool TryOpenTreasureChest(NTreasureRoom treasure)
+    {
+        if (GetAvailableTreasureChest(treasure) is not { } chest)
             return false;
 
         chest.ForceClick();

@@ -20,6 +20,10 @@ public static partial class McpMod
 
     private static string? GetPartyNameLanguage() => PartyNameLanguageReader.Value?.Invoke();
 
+    private static bool HasIncomingCoordinationPrompt(Dictionary<string, object?> chat) =>
+        chat.GetValueOrDefault("incoming_prompt") is JsonElement { ValueKind: JsonValueKind.Object } prompt &&
+        prompt.TryGetProperty("status", out var status) && status.GetString() == "pending";
+
     private static Dictionary<string, object?> ReadCoordinationDelta(int afterId) =>
         ExecuteCoordination("coordination_state", new()
         {

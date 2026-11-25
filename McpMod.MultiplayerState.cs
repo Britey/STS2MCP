@@ -234,7 +234,7 @@ public static partial class McpMod
             else
             {
                 result["state_type"] = "treasure";
-                result["treasure"] = BuildMultiplayerTreasureState(treasureRoom, runState, nameLanguage);
+                result["treasure"] = BuildMultiplayerTreasureState(treasureRoom, runState, nameLanguage, openChest: !decision);
             }
         }
         else
@@ -392,13 +392,13 @@ public static partial class McpMod
         return state;
     }
 
-    private static Dictionary<string, object?> BuildMultiplayerTreasureState(TreasureRoom treasureRoom, RunState runState, string? nameLanguage)
+    private static Dictionary<string, object?> BuildMultiplayerTreasureState(TreasureRoom treasureRoom, RunState runState, string? nameLanguage, bool openChest)
     {
         // Auto-open chest same as singleplayer. BeginRelicPicking() runs during
         // TreasureRoom.Enter(), so relics are already generated. The chest click
         // just triggers the UI animation + gold via OneOffSynchronizer - same path
         // as a human click or the game's own AutoSlay handler.
-        var state = BuildTreasureState(treasureRoom, runState);
+        var state = BuildTreasureState(treasureRoom, runState, openChest);
         if (TreasureAwards.TryGetValue(treasureRoom, out var awards)) state["awards"] = awards;
 
         // Add per-player bid data

@@ -62,7 +62,10 @@ public static partial class McpMod
             receipt["next_operation"] = "await_active_sequence_receipt";
             return;
         }
-        if (state.GetValueOrDefault("card_select") is Dictionary<string, object?> choice)
+        if (state.GetValueOrDefault("hand_select") is Dictionary<string, object?> hand)
+            receipt["next_tool"] = hand.GetValueOrDefault("can_confirm") is true
+                ? hand.GetValueOrDefault("confirm_tool") : hand.GetValueOrDefault("select_tool");
+        else if (state.GetValueOrDefault("card_select") is Dictionary<string, object?> choice)
             receipt["next_tool"] = choice.GetValueOrDefault("can_select") is false && choice.GetValueOrDefault("can_confirm") is true
                 ? choice.GetValueOrDefault("confirm_tool") : choice.GetValueOrDefault("select_tool");
         else if (state.GetValueOrDefault("battle") is Dictionary<string, object?> battle)

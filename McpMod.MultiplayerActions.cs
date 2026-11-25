@@ -5,8 +5,10 @@ using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.Entities.Actions;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
@@ -119,9 +121,9 @@ public static partial class McpMod
         }
 
         int turnNumber = playerState.TurnNumber;
-        RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
-            new EndPlayerTurnAction(player, turnNumber));
-        PendingVotes.AddOrUpdate(player, new(player.Creature.CombatState, turnNumber, System.Environment.TickCount64));
+        var vote = new EndPlayerTurnAction(player, turnNumber);
+        RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(vote);
+        PendingVotes.AddOrUpdate(player, new(player.Creature.CombatState, turnNumber, RunManager.Instance.NetService, vote));
 
         return new Dictionary<string, object?>
         {
@@ -131,14 +133,17 @@ public static partial class McpMod
         };
     }
 
-    private sealed record PendingVote(object? Combat, int Turn, long Sent);
+    private sealed record PendingVote(object? Combat, int Turn, INetGameService Network, EndPlayerTurnAction Action);
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Player, PendingVote> PendingVotes = new();
 
     private static bool VoteInFlight(Player player)
     {
         if (!PendingVotes.TryGetValue(player, out var vote)) return false;
-        if (ReferenceEquals(player.Creature.CombatState, vote.Combat) && player.PlayerCombatState?.TurnNumber == vote.Turn && !CombatManager.Instance.IsPlayerReadyToEndTurn(player)
-            && System.Environment.TickCount64 - vote.Sent < 5000)
+        if (ReferenceEquals(player.Creature.CombatState, vote.Combat) && player.PlayerCombatState?.TurnNumber == vote.Turn &&
+            ReferenceEquals(RunManager.Instance.NetService, vote.Network) && vote.Network.IsConnected &&
+            vote.Action.State != GameActionState.Canceled && !vote.Action.CompletionTask.IsCanceled &&
+            !vote.Action.CompletionTask.IsFaulted &&
+            !CombatManager.Instance.IsPlayerReadyToEndTurn(player))
             return true;
         PendingVotes.Remove(player);
         return false;
