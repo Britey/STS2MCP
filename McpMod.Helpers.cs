@@ -85,9 +85,23 @@ public static partial class McpMod
         catch { return SafeGetText(() => card.Description)?.Replace("\n", " "); }
     }
 
+    private static readonly Action<CardModel>? UpgradeCardPreview = BindCardPreviewUpgrade();
+
+    private static Action<CardModel>? BindCardPreviewUpgrade()
+    {
+        var model = typeof(CardModel);
+        // v0.114.0 added an optional silent flag. Bind both signatures for older game builds.
+        if (model.GetMethod("UpgradeInternal", [typeof(bool)]) is { } current)
+        {
+            var upgrade = current.CreateDelegate<Action<CardModel, bool>>();
+            return card => upgrade(card, false);
+        }
+        return model.GetMethod("UpgradeInternal", Type.EmptyTypes)?.CreateDelegate<Action<CardModel>>();
+    }
+
     private static CardModel? SafeBuildUpgradedCardPreview(CardModel card)
     {
-        if (!card.IsUpgradable)
+        if (!card.IsUpgradable || UpgradeCardPreview == null)
             return null;
 
         try
@@ -95,7 +109,7 @@ public static partial class McpMod
             var preview = card.IsMutable
                 ? (CardModel)card.MutableClone()
                 : card.ToMutable();
-            preview.UpgradeInternal();
+            UpgradeCardPreview(preview);
             return preview;
         }
         catch
